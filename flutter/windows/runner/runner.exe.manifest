@@ -17,4 +17,7 @@
       <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
     </application>
   </compatibility>
+    <security>
+      <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+    </security>
 </assembly>

@@ -421,7 +421,7 @@ impl Client {
             NatType::from_i32(my_nat_type).unwrap_or(NatType::UNKNOWN_NAT)
         };
 
-        if !key.is_empty() && !token.is_empty() {
+        if false && !token.is_empty() {
             // mainly for the security of token
             secure_tcp(&mut socket, &key)
                 .await
@@ -850,7 +850,7 @@ impl Client {
                 .await
                 .with_context(|| "Failed to connect to rendezvous server")?;
 
-            if !key.is_empty() && !token.is_empty() {
+            if false && !token.is_empty() {
                 // mainly for the security of token
                 secure_tcp(&mut socket, key).await?;
             }
