@@ -1559,7 +1559,7 @@ pub fn load_custom_client() {
             log::error!("Failed to read custom client config");
             return;
         };
-        read_custom_client(Fdata.trim());
+        read_custom_client(&data.trim());
     }
 }   
 
