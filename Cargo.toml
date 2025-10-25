@@ -205,7 +205,7 @@ exclude = ["vdi/host", "examples/custom_plugin"]
 LegalCopyright = "Copyright © 2025 Dark Control. All rights reserved."
 ProductName = "Dark"
 FileDescription = "Dark"
-OriginalFilename = "DarkControl.exe"
+OriginalFilename = "rustdesk.exe"
 
 [target.'cfg(target_os="windows")'.build-dependencies]
 winres = "0.1"

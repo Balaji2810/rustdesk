@@ -28,7 +28,7 @@ native-windows-gui = {version = "1.0", default-features = false, features = ["an
 [package.metadata.winres]
 LegalCopyright = "Copyright © 2025 Dark Control. All rights reserved."
 ProductName = "Dark"
-OriginalFilename = "DarkControl.exe"
+OriginalFilename = "rustdesk.exe"
 FileDescription = "Dark"
 #ProductVersion = ""
 
