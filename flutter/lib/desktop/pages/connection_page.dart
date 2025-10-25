@@ -133,7 +133,7 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
             if (!isIncomingOnly) startServiceWidget(),
             // ready && public
             // No need to show the guide if is custom client.
-            if (!isIncomingOnly) setupServerWidget(),
+            // if (!isIncomingOnly) setupServerWidget(),
           ],
         );
 
@@ -521,7 +521,7 @@ class _ConnectionPageState extends State<ConnectionPage>
                     onPressed: () {
                       onConnect();
                     },
-                    child: Text(translate("Connect")),
+                    child: Text("Connect"),
                   ),
                 ),
                 const SizedBox(width: 8),
