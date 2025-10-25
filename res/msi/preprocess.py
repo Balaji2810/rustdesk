@@ -453,6 +453,11 @@ def prepare_resources():
 
 
 def init_global_vars(dist_dir, app_name, args):
+
+    #print all the file with path
+    for i in dist_dir.glob("**/*"):
+        print("file path: ", i)
+        
     dist_app = dist_dir.joinpath(app_name + ".exe")
 
     def read_process_output(args):
@@ -464,6 +469,9 @@ def init_global_vars(dist_dir, app_name, args):
         )
         output, _ = process.communicate()
         return output.decode("utf-8").strip()
+
+    
+
 
     global g_version
     global g_build_date
