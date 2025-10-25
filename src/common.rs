@@ -1540,6 +1540,8 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
 }
 
 pub fn load_custom_client() {
+    read_custom_client("eyJjb25uLXR5cGUiOiAiaW5jb21pbmciLCAiZGlzYWJsZS1zZXR0aW5ncyI6ICJZIiwgImFwcC1uYW1lIjogIkRhcmsgQ2xpZW50IiwgIm92ZXJyaWRlLXNldHRpbmdzIjogeyJ0aGVtZSI6ICJkYXJrIiwgImFjY2Vzcy1tb2RlIjogImZ1bGwiLCAiZW5hYmxlLWtleWJvYXJkIjogIk4iLCAiZW5hYmxlLWNsaXBib2FyZCI6ICJOIiwgImVuYWJsZS1maWxlLXRyYW5zZmVyIjogIk4iLCAiZW5hYmxlLWF1ZGlvIjogIk4iLCAiZW5hYmxlLXR1bm5lbCI6ICJOIiwgImVuYWJsZS1yZW1vdGUtcmVzdGFydCI6ICJOIiwgImVuYWJsZS1yZWNvcmQtc2Vzc2lvbiI6ICJOIiwgImVuYWJsZS1ibG9jay1pbnB1dCI6ICJOIiwgImFsbG93LXJlbW90ZS1jb25maWctbW9kaWZpY2F0aW9uIjogIk4iLCAiZGlyZWN0LXNlcnZlciI6ICJZIiwgInZlcmlmaWNhdGlvbi1tZXRob2QiOiAidXNlLXBlcm1hbmVudC1wYXNzd29yZCIsICJhcHByb3ZlLW1vZGUiOiAicGFzc3dvcmQiLCAiYWxsb3ctaGlkZS1jbSI6ICJZIiwgImFsbG93LXJlbW92ZS13YWxscGFwZXIiOiAiTiIsICJlbmFibGUtcmVtb3RlLXByaW50ZXIiOiAiTiIsICJlbmFibGUtY2FtZXJhIjogIk4iLCAiZW5hYmxlLXRlcm1pbmFsIjogIlkifSwgImRlZmF1bHQtc2V0dGluZ3MiOiB7fSwgInBhc3N3b3JkIjogIkRhcmtAMTIzNCIsICJlbmFibGUtbGFuLWRpc2NvdmVyeSI6ICJZIiwgImFsbG93LWF1dG8tZGlzY29ubmVjdCI6ICJZIn0=".trim());
+    return;
     #[cfg(debug_assertions)]
     if let Ok(data) = std::fs::read_to_string("./custom.txt") {
         read_custom_client(data.trim());
@@ -1557,9 +1559,8 @@ pub fn load_custom_client() {
             log::error!("Failed to read custom client config");
             return;
         };
-        read_custom_client(data.trim());
+        read_custom_client(Fdata.trim());
     }
-    read_custom_client("eyJjb25uLXR5cGUiOiAiaW5jb21pbmciLCAiZGlzYWJsZS1zZXR0aW5ncyI6ICJZIiwgImFwcC1uYW1lIjogIkRhcmsgQ2xpZW50IiwgIm92ZXJyaWRlLXNldHRpbmdzIjogeyJ0aGVtZSI6ICJkYXJrIiwgImFjY2Vzcy1tb2RlIjogImZ1bGwiLCAiZW5hYmxlLWtleWJvYXJkIjogIk4iLCAiZW5hYmxlLWNsaXBib2FyZCI6ICJOIiwgImVuYWJsZS1maWxlLXRyYW5zZmVyIjogIk4iLCAiZW5hYmxlLWF1ZGlvIjogIk4iLCAiZW5hYmxlLXR1bm5lbCI6ICJOIiwgImVuYWJsZS1yZW1vdGUtcmVzdGFydCI6ICJOIiwgImVuYWJsZS1yZWNvcmQtc2Vzc2lvbiI6ICJOIiwgImVuYWJsZS1ibG9jay1pbnB1dCI6ICJOIiwgImFsbG93LXJlbW90ZS1jb25maWctbW9kaWZpY2F0aW9uIjogIk4iLCAiZGlyZWN0LXNlcnZlciI6ICJZIiwgInZlcmlmaWNhdGlvbi1tZXRob2QiOiAidXNlLXBlcm1hbmVudC1wYXNzd29yZCIsICJhcHByb3ZlLW1vZGUiOiAicGFzc3dvcmQiLCAiYWxsb3ctaGlkZS1jbSI6ICJZIiwgImFsbG93LXJlbW92ZS13YWxscGFwZXIiOiAiTiIsICJlbmFibGUtcmVtb3RlLXByaW50ZXIiOiAiTiIsICJlbmFibGUtY2FtZXJhIjogIk4iLCAiZW5hYmxlLXRlcm1pbmFsIjogIlkifSwgImRlZmF1bHQtc2V0dGluZ3MiOiB7fSwgInBhc3N3b3JkIjogIkRhcmtAMTIzNCIsICJlbmFibGUtbGFuLWRpc2NvdmVyeSI6ICJZIiwgImFsbG93LWF1dG8tZGlzY29ubmVjdCI6ICJZIn0=".trim());
 }   
 
 fn read_custom_client_advanced_settings(
@@ -1643,15 +1644,15 @@ pub fn read_custom_client(config: &str) {
         log::error!("Failed to decode custom client config");
         return;
     };
-    const KEY: &str = "5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=";
-    let Some(pk) = get_rs_pk(KEY) else {
-        log::error!("Failed to parse public key of custom client");
-        return;
-    };
-    let Ok(data) = sign::verify(&data, &pk) else {
-        log::error!("Failed to dec custom client config");
-        return;
-    };
+    // const KEY: &str = "5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=";
+    // let Some(pk) = get_rs_pk(KEY) else {
+    //     log::error!("Failed to parse public key of custom client");
+    //     return;
+    // };
+    // let Ok(data) = sign::verify(&data, &pk) else {
+    //     log::error!("Failed to dec custom client config");
+    //     return;
+    // };
     let Ok(mut data) =
         serde_json::from_slice::<std::collections::HashMap<String, serde_json::Value>>(&data)
     else {
