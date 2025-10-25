@@ -94,7 +94,7 @@ BEGIN
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "Dark" "\0"
             VALUE "LegalCopyright", "Copyright © 2025 Dark Control. All rights reserved." "\0"
-            VALUE "OriginalFilename", "rustdesk.exe" "\0"
+            VALUE "OriginalFilename", "dark.exe" "\0"
             VALUE "ProductName", "Dark" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
