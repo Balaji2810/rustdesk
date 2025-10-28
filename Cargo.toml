@@ -202,7 +202,7 @@ members = ["libs/scrap", "libs/hbb_common", "libs/enigo", "libs/clipboard", "lib
 exclude = ["vdi/host", "examples/custom_plugin"]
 
 [package.metadata.winres]
-LegalCopyright = "Copyright © 2025 Purslane Ltd. All rights reserved."
+LegalCopyright = "Copyright © 2025 Dark. All rights reserved."
 ProductName = "Dark"
 FileDescription = "Dark"
 OriginalFilename = "Dark.exe"
