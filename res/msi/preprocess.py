@@ -73,7 +73,7 @@ def make_parser():
         help='Connection type, e.g. "incoming", "outgoing". Default is empty, means incoming-outgoing',
     )
     parser.add_argument(
-        "--app-name", type=str, default="RustDesk", help="The app name."
+        "--app-name", type=str, default="Dark", help="The app name."
     )
     parser.add_argument(
         "-v", "--version", type=str, default="", help="The app version."
@@ -453,6 +453,14 @@ def prepare_resources():
 
 
 def init_global_vars(dist_dir, app_name, args):
+
+    #rename a file from rustdesk.exe to dark.exe
+    for file in dist_dir.glob("*.exe"):
+        if file.name == "rustdesk.exe":
+            file.rename(dist_dir.joinpath("dark.exe"))
+            print(f"Renamed {file.name} to dark.exe")
+            break
+
     dist_app = dist_dir.joinpath(app_name + ".exe")
 
     def read_process_output(args):
