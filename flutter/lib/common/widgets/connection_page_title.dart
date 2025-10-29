@@ -11,7 +11,7 @@ Widget getConnectionPageTitle(BuildContext context, bool isWeb) {
           child: Row(
         children: [
           AutoSizeText(
-            translate('Control Remote Desktop'),
+            translate('Dark: Remote Desktop'),
             maxLines: 1,
             style: Theme.of(context)
                 .textTheme
@@ -20,7 +20,7 @@ Widget getConnectionPageTitle(BuildContext context, bool isWeb) {
           ).marginOnly(right: 4),
           Tooltip(
             waitDuration: Duration(milliseconds: 300),
-            message: translate(isWeb ? "web_id_input_tip" : "id_input_tip"),
+            message: "Enter the ID of the device you want to connect to",
             child: Icon(
               Icons.help_outline_outlined,
               size: 16,

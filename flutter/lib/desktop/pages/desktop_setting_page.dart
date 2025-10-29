@@ -183,34 +183,34 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
           settingTabs.add(_TabInfo(
               tab, 'General', Icons.settings_outlined, Icons.settings));
           break;
-        case SettingsTabKey.safety:
-          settingTabs.add(_TabInfo(tab, 'Security',
-              Icons.enhanced_encryption_outlined, Icons.enhanced_encryption));
-          break;
-        case SettingsTabKey.network:
-          settingTabs
-              .add(_TabInfo(tab, 'Network', Icons.link_outlined, Icons.link));
-          break;
+        // case SettingsTabKey.safety:
+        //   settingTabs.add(_TabInfo(tab, 'Security',
+        //       Icons.enhanced_encryption_outlined, Icons.enhanced_encryption));
+        //   break;
+        // case SettingsTabKey.network:
+        //   settingTabs
+        //       .add(_TabInfo(tab, 'Network', Icons.link_outlined, Icons.link));
+        //   break;
         case SettingsTabKey.display:
           settingTabs.add(_TabInfo(tab, 'Display',
               Icons.desktop_windows_outlined, Icons.desktop_windows));
           break;
-        case SettingsTabKey.plugin:
-          settingTabs.add(_TabInfo(
-              tab, 'Plugin', Icons.extension_outlined, Icons.extension));
-          break;
-        case SettingsTabKey.account:
-          settingTabs.add(
-              _TabInfo(tab, 'Account', Icons.person_outline, Icons.person));
-          break;
-        case SettingsTabKey.printer:
-          settingTabs
-              .add(_TabInfo(tab, 'Printer', Icons.print_outlined, Icons.print));
-          break;
-        case SettingsTabKey.about:
-          settingTabs
-              .add(_TabInfo(tab, 'About', Icons.info_outline, Icons.info));
-          break;
+        // case SettingsTabKey.plugin:
+        //   settingTabs.add(_TabInfo(
+        //       tab, 'Plugin', Icons.extension_outlined, Icons.extension));
+        //   break;
+        // case SettingsTabKey.account:
+        //   settingTabs.add(
+        //       _TabInfo(tab, 'Account', Icons.person_outline, Icons.person));
+        //   break;
+        // case SettingsTabKey.printer:
+        //   settingTabs
+        //       .add(_TabInfo(tab, 'Printer', Icons.print_outlined, Icons.print));
+        //   break;
+        // case SettingsTabKey.about:
+        //   settingTabs
+        //       .add(_TabInfo(tab, 'About', Icons.info_outline, Icons.info));
+        //   break;
       }
     }
     return settingTabs;
@@ -414,8 +414,8 @@ class _GeneralState extends State<_General> {
       controller: scrollController,
       children: [
         if (!isWeb) service(),
-        theme(),
-        _Card(title: 'Language', children: [language()]),
+        // theme(),
+        // _Card(title: 'Language', children: [language()]),
         if (!isWeb) hwcodec(),
         if (!isWeb) audio(context),
         if (!isWeb) record(context),
@@ -1649,7 +1649,7 @@ class _DisplayState extends State<_Display> {
       imageQuality(context),
       codec(context),
       if (isDesktop) trackpadSpeed(context),
-      if (!isWeb) privacyModeImpl(context),
+      // if (!isWeb) privacyModeImpl(context),
       other(context),
     ]).marginOnly(bottom: _kListViewBottomMargin);
   }
