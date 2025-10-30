@@ -249,18 +249,18 @@ class ColorThemeExtension extends ThemeExtension<ColorThemeExtension> {
 class MyTheme {
   MyTheme._();
 
-  static const Color grayBg = Color(0xFFEFEFF2);
-  static const Color accent = Color(0xFF0071FF);
-  static const Color accent50 = Color(0x770071FF);
-  static const Color accent80 = Color(0xAA0071FF);
-  static const Color canvasColor = Color(0xFF212121);
-  static const Color border = Color(0xFFCCCCCC);
-  static const Color idColor = Color(0xFF00B6F0);
-  static const Color darkGray = Color.fromARGB(255, 148, 148, 148);
-  static const Color cmIdColor = Color(0xFF21790B);
-  static const Color dark = Colors.black87;
-  static const Color button = Color(0xFFB841FF); //0xFF2C8CFF
-  static const Color hoverBorder = Color(0xFF999999);
+static const Color grayBg = Color(0xFFF3EFF9);  // Very light purple-tinted background
+static const Color accent = Color(0xFF471396);  // Your base color
+static const Color accent50 = Color(0x77471396);  // 50% opacity of base color
+static const Color accent80 = Color(0xAA471396);  // 80% opacity of base color
+static const Color canvasColor = Color(0xFF1A0A2E);  // Dark purple canvas
+static const Color border = Color(0xFFD4C4E8);  // Light purple border
+static const Color idColor = Color(0xFF6B1FC2);  // Brighter purple for IDs
+static const Color darkGray = Color.fromARGB(255, 120, 100, 148);  // Purple-tinted gray
+static const Color cmIdColor = Color(0xFF8D4CD4);  // Medium purple for CM IDs
+static const Color dark = Colors.black87;  // Keep as is or use Color(0xFF2D1154) for purple-black
+static const Color button = Color(0xFF5E1AAD);  // Medium-dark purple for buttons
+static const Color hoverBorder = Color(0xFFA388CC);  // Medium purple-gray for hover
 
   // ListTile
   static const ListTileThemeData listTileTheme = ListTileThemeData(
