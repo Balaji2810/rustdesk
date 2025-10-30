@@ -461,40 +461,40 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
   Widget _buildToolbar(BuildContext context) {
     final List<Widget> toolbarItems = [];
-    toolbarItems.add(_PinMenu(state: widget.state));
-    if (!isWebDesktop) {
-      toolbarItems.add(_MobileActionMenu(ffi: widget.ffi));
+    // toolbarItems.add(_PinMenu(state: widget.state));
+    // if (!isWebDesktop) {
+    //   toolbarItems.add(_MobileActionMenu(ffi: widget.ffi));
+    // }
+
+    // toolbarItems.add(Obx(() {
+    //   if (PrivacyModeState.find(widget.id).isEmpty &&
+    //       pi.displaysCount.value > 1) {
+    //     return _MonitorMenu(
+    //         id: widget.id,
+    //         ffi: widget.ffi,
+    //         setRemoteState: widget.setRemoteState);
+    //   } else {
+    //     return Offstage();
+    //   }
+    // }));
+
+    // toolbarItems
+    //     .add(_ControlMenu(id: widget.id, ffi: widget.ffi, state: widget.state));
+    // Do not show keyboard for camera connection type.
+    // if (widget.ffi.connType == ConnType.defaultConn) {
+    //   toolbarItems.add(_KeyboardMenu(id: widget.id, ffi: widget.ffi));
+    // }
+    toolbarItems.add(_ChatMenu(id: widget.id, ffi: widget.ffi));
+    if (!isWeb) {
+      toolbarItems.add(_VoiceCallMenu(id: widget.id, ffi: widget.ffi));
     }
-
-    toolbarItems.add(Obx(() {
-      if (PrivacyModeState.find(widget.id).isEmpty &&
-          pi.displaysCount.value > 1) {
-        return _MonitorMenu(
-            id: widget.id,
-            ffi: widget.ffi,
-            setRemoteState: widget.setRemoteState);
-      } else {
-        return Offstage();
-      }
-    }));
-
-    toolbarItems
-        .add(_ControlMenu(id: widget.id, ffi: widget.ffi, state: widget.state));
     toolbarItems.add(_DisplayMenu(
       id: widget.id,
       ffi: widget.ffi,
       state: widget.state,
       setFullscreen: _setFullscreen,
     ));
-    // Do not show keyboard for camera connection type.
-    if (widget.ffi.connType == ConnType.defaultConn) {
-      toolbarItems.add(_KeyboardMenu(id: widget.id, ffi: widget.ffi));
-    }
-    toolbarItems.add(_ChatMenu(id: widget.id, ffi: widget.ffi));
-    if (!isWeb) {
-      toolbarItems.add(_VoiceCallMenu(id: widget.id, ffi: widget.ffi));
-    }
-    if (!isWeb) toolbarItems.add(_RecordMenu());
+    // if (!isWeb) toolbarItems.add(_RecordMenu());
     toolbarItems.add(_CloseMenu(id: widget.id, ffi: widget.ffi));
     final toolbarBorderRadius = BorderRadius.all(Radius.circular(4.0));
     return Column(
@@ -1099,19 +1099,19 @@ class _DisplayMenuState extends State<_DisplayMenu> {
               child: privacyModeList[0].child,
               ffi: ffi));
         } else if (privacyModeList.length > 1) {
-          menuChildren.addAll([
-            Divider(),
-            _SubmenuButton(
-                ffi: widget.ffi,
-                child: Text(translate('Privacy mode')),
-                menuChildren: privacyModeList
-                    .map((e) => CkbMenuButton(
-                        value: e.value,
-                        onChanged: e.onChanged,
-                        child: e.child,
-                        ffi: ffi))
-                    .toList()),
-          ]);
+          // menuChildren.addAll([
+          //   Divider(),
+          //   _SubmenuButton(
+          //       ffi: widget.ffi,
+          //       child: Text(translate('Privacy mode')),
+          //       menuChildren: privacyModeList
+          //           .map((e) => CkbMenuButton(
+          //               value: e.value,
+          //               onChanged: e.onChanged,
+          //               child: e.child,
+          //               ffi: ffi))
+          //           .toList()),
+          // ]);
         }
       }
       if (ffi.connType == ConnType.defaultConn) {
