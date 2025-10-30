@@ -3620,7 +3620,7 @@ pub trait Interface: Send + Clone + 'static + Sized {
 
     fn on_establish_connection_error(&self, err: String) {
         let title = "Connection Error";
-        let text = err.to_string();
+        let text = "Something went wrong. Please try again later."; //err.to_string();
         let lc = self.get_lch();
         let direct = lc.read().unwrap().direct;
         let received = lc.read().unwrap().received;

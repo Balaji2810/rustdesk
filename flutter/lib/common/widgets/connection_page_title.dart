@@ -11,7 +11,7 @@ Widget getConnectionPageTitle(BuildContext context, bool isWeb) {
           child: Row(
         children: [
           AutoSizeText(
-            translate('Dark: Remote Desktop'),
+            "Dark",
             maxLines: 1,
             style: Theme.of(context)
                 .textTheme
