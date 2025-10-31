@@ -419,7 +419,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
             ),
           if (isOutgoingOnly)
             Text(
-              translate("outgoing_only_desk_tip"),
+              "Control the Dark clients using the Dark network.",
               overflow: TextOverflow.clip,
               style: Theme.of(context).textTheme.bodySmall,
             ),
