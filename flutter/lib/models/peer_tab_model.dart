@@ -22,7 +22,7 @@ class PeerTabModel with ChangeNotifier {
   WeakReference<FFI> parent;
   int get currentTab => _currentTab;
   int _currentTab = 0; // index in tabNames
-  static const int maxTabCount = 3; //changed here to hide the group tab
+  static const int maxTabCount = 2; //changed here to hide the group tab
   static const List<String> tabNames = [
     'Recent sessions',
     'Favorites',
