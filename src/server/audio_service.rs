@@ -785,8 +785,9 @@ mod cpal_impl {
                 
                 // Prevent unbounded growth if loopback stops
                 const MAX_BUFFER: usize = 96000; // 1 second at 48kHz stereo
-                if lock.len() > MAX_BUFFER {
-                    lock.drain(0..(lock.len() - MAX_BUFFER));
+                let len = lock.len();
+                if len > MAX_BUFFER {
+                    lock.drain(0..(len - MAX_BUFFER));
                 }
             },
             err_fn,
