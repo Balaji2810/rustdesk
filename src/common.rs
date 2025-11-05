@@ -219,6 +219,25 @@ pub fn set_sound_input(device: String) {
     }
 }
 
+/// Set microphone input device (for mixing with system audio on Windows).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn set_mic_input(device: String) {
+    let prior_device = get_option("mic-input".to_owned());
+    if prior_device != device {
+        log::info!("switch to microphone input device {}", device);
+        let device_clone = device.clone();
+        std::thread::spawn(move || {
+            set_option("mic-input".to_owned(), device_clone.clone());
+            #[cfg(not(target_os = "linux"))]
+            crate::server::audio_service::set_mic_input_device(
+                if device_clone.is_empty() { None } else { Some(device_clone) }
+            );
+        });
+    } else {
+        log::info!("microphone input is already set to {}", device);
+    }
+}
+
 /// Get system's default sound input device name.
 #[inline]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

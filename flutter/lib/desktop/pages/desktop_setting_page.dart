@@ -627,6 +627,92 @@ class _GeneralState extends State<_General> {
       return const Offstage();
     }
 
+    // For Windows: Show both system audio and microphone options
+    if (isWindows) {
+      return Column(
+        children: [
+          // System Audio / Audio Input Device
+          AudioInput(
+            builder: (devices, currentDevice, setDevice) {
+              final child = ComboBox(
+                keys: devices,
+                values: devices,
+                initialKey: currentDevice,
+                onChanged: (key) async {
+                  setDevice(key);
+                  setState(() {});
+                },
+              ).marginOnly(left: _kContentHMargin);
+              return _Card(title: 'Audio Input Device', children: [child]);
+            },
+            isCm: false,
+            isVoiceCall: false,
+          ),
+          // Microphone Input (for mixing with system audio)
+          FutureBuilder<Map<String, Object>>(
+            future: () async {
+              List<String> devices = (await bind.mainGetSoundInputs()).toList();
+              String current = await bind.mainGetMicInput();
+              return {'devices': devices, 'current': current};
+            }(),
+            builder: (context, snapshot) {
+              if (!snapshot.hasData) {
+                return const Offstage();
+              }
+              
+              final data = snapshot.data!;
+              List<String> devices = data['devices'] as List<String>;
+              String currentDevice = data['current'] as String;
+              
+              if (devices.isEmpty) {
+                return const Offstage();
+              }
+              
+              // Add "None" option at the beginning
+              final allKeys = ['', ...devices];
+              final allValues = ['None', ...devices];
+              
+              final child = Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Select a microphone to mix with system audio (optional)',
+                    style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                  ).marginOnly(left: _kContentHMargin, bottom: 8),
+                  ComboBox(
+                    keys: allKeys,
+                    values: allValues,
+                    initialKey: currentDevice.isEmpty ? '' : currentDevice,
+                    onChanged: (key) async {
+                      await bind.mainSetMicInput(device: key ?? '');
+                      setState(() {});
+                    },
+                  ).marginOnly(left: _kContentHMargin),
+                ],
+              );
+              
+              return _Card(
+                title: 'Microphone Input',
+                children: [child],
+              );
+            },
+          ),
+          // Info text
+          Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: _kContentHMargin,
+              vertical: 8,
+            ),
+            child: Text(
+              'Note: When both system audio and microphone are configured, they will be mixed and transmitted together.',
+              style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+            ),
+          ),
+        ],
+      );
+    }
+
+    // For non-Windows: Original single audio input
     builder(devices, currentDevice, setDevice) {
       final child = ComboBox(
         keys: devices,

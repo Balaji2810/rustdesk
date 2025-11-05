@@ -1560,6 +1560,20 @@ pub fn get_voice_call_input_device(_is_cm: bool) -> String {
     "".to_owned()
 }
 
+pub fn main_set_mic_input(_device: String) {
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "linux")))]
+    crate::common::set_mic_input(_device);
+}
+
+pub fn main_get_mic_input() -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        Config::get_option("mic-input")
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    "".to_owned()
+}
+
 pub fn main_get_last_remote_id() -> String {
     LocalConfig::get_remote_id()
 }

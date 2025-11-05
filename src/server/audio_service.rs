@@ -24,6 +24,7 @@ static RESTARTING: AtomicBool = AtomicBool::new(false);
 
 lazy_static::lazy_static! {
     static ref VOICE_CALL_INPUT_DEVICE: Arc::<Mutex::<Option<String>>> = Default::default();
+    static ref MIC_INPUT_DEVICE: Arc::<Mutex::<Option<String>>> = Default::default();
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -65,6 +66,27 @@ fn get_audio_input() -> String {
         .unwrap()
         .clone()
         .unwrap_or(Config::get_option("audio-input"))
+}
+
+#[inline]
+pub fn get_mic_input_device() -> Option<String> {
+    let device = MIC_INPUT_DEVICE.lock().unwrap().clone();
+    if device.is_none() {
+        let cfg = Config::get_option("mic-input");
+        if !cfg.is_empty() {
+            return Some(cfg);
+        }
+    }
+    device
+}
+
+#[inline]
+pub fn set_mic_input_device(device: Option<String>) {
+    if *MIC_INPUT_DEVICE.lock().unwrap() == device {
+        return;
+    }
+    *MIC_INPUT_DEVICE.lock().unwrap() = device;
+    restart();
 }
 
 pub fn restart() {
@@ -176,6 +198,8 @@ mod cpal_impl {
     lazy_static::lazy_static! {
         static ref HOST: Host = cpal::default_host();
         static ref INPUT_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+        static ref LOOPBACK_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+        static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
     }
 
     #[cfg(feature = "screencapturekit")]
@@ -186,32 +210,34 @@ mod cpal_impl {
     #[derive(Default)]
     pub struct State {
         stream: Option<(Box<dyn StreamTrait>, Arc<Message>)>,
+        loopback_stream: Option<Box<dyn StreamTrait>>,
+        mic_stream: Option<Box<dyn StreamTrait>>,
     }
 
     impl super::service::Reset for State {
         fn reset(&mut self) {
             self.stream.take();
+            self.loopback_stream.take();
+            self.mic_stream.take();
         }
     }
 
     fn run_restart(sp: EmptyExtraFieldService, state: &mut State) -> ResultType<()> {
         state.reset();
         sp.snapshot(|_sps: ServiceSwap<_>| Ok(()))?;
-        match &state.stream {
-            None => {
-                state.stream = Some(play(&sp)?);
+        
+        #[cfg(windows)]
+        {
+            if state.stream.is_none() && state.loopback_stream.is_none() && state.mic_stream.is_none() {
+                let (loopback, mic, format) = play_dual(&sp)?;
+                state.loopback_stream = loopback;
+                state.mic_stream = mic;
+                sp.send_shared(format);
             }
-            _ => {}
         }
-        if let Some((_, format)) = &state.stream {
-            sp.send_shared(format.clone());
-        }
-        RESTARTING.store(false, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn run_serv_snapshot(sp: EmptyExtraFieldService, state: &mut State) -> ResultType<()> {
-        sp.snapshot(|sps| {
+        
+        #[cfg(not(windows))]
+        {
             match &state.stream {
                 None => {
                     state.stream = Some(play(&sp)?);
@@ -219,7 +245,37 @@ mod cpal_impl {
                 _ => {}
             }
             if let Some((_, format)) = &state.stream {
-                sps.send_shared(format.clone());
+                sp.send_shared(format.clone());
+            }
+        }
+        
+        RESTARTING.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn run_serv_snapshot(sp: EmptyExtraFieldService, state: &mut State) -> ResultType<()> {
+        sp.snapshot(|sps| {
+            #[cfg(windows)]
+            {
+                if state.stream.is_none() && state.loopback_stream.is_none() && state.mic_stream.is_none() {
+                    let (loopback, mic, format) = play_dual(&sp)?;
+                    state.loopback_stream = loopback;
+                    state.mic_stream = mic;
+                    sps.send_shared(format);
+                }
+            }
+            
+            #[cfg(not(windows))]
+            {
+                match &state.stream {
+                    None => {
+                        state.stream = Some(play(&sp)?);
+                    }
+                    _ => {}
+                }
+                if let Some((_, format)) = &state.stream {
+                    sps.send_shared(format.clone());
+                }
             }
             Ok(())
         })?;
@@ -346,6 +402,141 @@ mod cpal_impl {
         Ok((device, format))
     }
 
+    #[cfg(windows)]
+    fn play_dual(sp: &GenericService) -> ResultType<(Option<Box<dyn StreamTrait>>, Option<Box<dyn StreamTrait>>, Arc<Message>)> {
+        use cpal::SampleFormat::*;
+        
+        let audio_input = super::get_audio_input();
+        let mic_input = super::get_mic_input_device();
+        
+        // Check if we want loopback (system audio)
+        let want_loopback = audio_input.is_empty();
+        
+        // Get loopback device if needed
+        let loopback_config = if want_loopback {
+            match HOST.default_output_device() {
+                Some(dev) => {
+                    match dev.default_output_config() {
+                        Ok(cfg) => {
+                            log::info!("Loopback device: {}", dev.name().unwrap_or_default());
+                            Some((dev, cfg))
+                        }
+                        Err(e) => {
+                            log::error!("Failed to get loopback config: {}", e);
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        
+        // Get microphone device if specified
+        let mic_config = if let Some(ref mic_name) = mic_input {
+            if !mic_name.is_empty() {
+                match HOST.devices() {
+                    Ok(devices) => {
+                        let mut found = None;
+                        for d in devices {
+                            if d.name().unwrap_or_default() == *mic_name {
+                                if let Ok(cfg) = d.default_input_config() {
+                                    log::info!("Microphone device: {}", mic_name);
+                                    found = Some((d, cfg));
+                                }
+                                break;
+                            }
+                        }
+                        found
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
+        // If no devices, fallback to standard method
+        if loopback_config.is_none() && mic_config.is_none() {
+            let (stream, msg) = play(sp)?;
+            return Ok((Some(stream), None, msg));
+        }
+        
+        // Use loopback or mic config for encoder setup
+        let ref_config = loopback_config.as_ref()
+            .map(|(_, c)| c)
+            .or_else(|| mic_config.as_ref().map(|(_, c)| c))
+            .unwrap();
+        
+        let sample_rate_0 = ref_config.sample_rate().0;
+        let sample_rate = if sample_rate_0 < 12000 {
+            8000
+        } else if sample_rate_0 < 16000 {
+            12000
+        } else if sample_rate_0 < 24000 {
+            16000
+        } else if sample_rate_0 < 48000 {
+            24000
+        } else {
+            48000
+        };
+        
+        let ch = if ref_config.channels() > 1 { Stereo } else { Mono };
+        let format_msg = Arc::new(create_format_msg(sample_rate, ch as _));
+        
+        LOOPBACK_BUFFER.lock().unwrap().clear();
+        MIC_BUFFER.lock().unwrap().clear();
+        
+        let sp_clone = sp.clone();
+        
+        // Build loopback stream if available
+        let loopback_stream = if let Some((device, config)) = loopback_config {
+            let stream = match config.sample_format() {
+                I8 => build_loopback_stream::<i8>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                I16 => build_loopback_stream::<i16>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                I32 => build_loopback_stream::<i32>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                I64 => build_loopback_stream::<i64>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                U8 => build_loopback_stream::<u8>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                U16 => build_loopback_stream::<u16>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                U32 => build_loopback_stream::<u32>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                U64 => build_loopback_stream::<u64>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                F32 => build_loopback_stream::<f32>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                F64 => build_loopback_stream::<f64>(device, &config, sp_clone.clone(), sample_rate, ch)?,
+                f => bail!("unsupported loopback format: {:?}", f),
+            };
+            stream.play()?;
+            Some(Box::new(stream) as Box<dyn StreamTrait>)
+        } else {
+            None
+        };
+        
+        // Build microphone stream if available
+        let mic_stream = if let Some((device, config)) = mic_config {
+            let stream = match config.sample_format() {
+                I8 => build_mic_stream::<i8>(device, &config, sample_rate, ch)?,
+                I16 => build_mic_stream::<i16>(device, &config, sample_rate, ch)?,
+                I32 => build_mic_stream::<i32>(device, &config, sample_rate, ch)?,
+                I64 => build_mic_stream::<i64>(device, &config, sample_rate, ch)?,
+                U8 => build_mic_stream::<u8>(device, &config, sample_rate, ch)?,
+                U16 => build_mic_stream::<u16>(device, &config, sample_rate, ch)?,
+                U32 => build_mic_stream::<u32>(device, &config, sample_rate, ch)?,
+                U64 => build_mic_stream::<u64>(device, &config, sample_rate, ch)?,
+                F32 => build_mic_stream::<f32>(device, &config, sample_rate, ch)?,
+                F64 => build_mic_stream::<f64>(device, &config, sample_rate, ch)?,
+                f => bail!("unsupported mic format: {:?}", f),
+            };
+            stream.play()?;
+            Some(Box::new(stream) as Box<dyn StreamTrait>)
+        } else {
+            None
+        };
+        
+        Ok((loopback_stream, mic_stream, format_msg))
+    }
+
     fn play(sp: &GenericService) -> ResultType<(Box<dyn StreamTrait>, Arc<Message>)> {
         use cpal::SampleFormat::*;
         let (device, config) = get_device()?;
@@ -441,6 +632,165 @@ mod cpal_impl {
             },
             err_fn,
             timeout,
+        )?;
+        Ok(stream)
+    }
+
+    // Build loopback stream that mixes with microphone and encodes
+    #[cfg(windows)]
+    fn build_loopback_stream<T>(
+        device: cpal::Device,
+        config: &cpal::SupportedStreamConfig,
+        sp: GenericService,
+        sample_rate: u32,
+        encode_channel: magnum_opus::Channels,
+    ) -> ResultType<cpal::Stream>
+    where
+        T: cpal::SizedSample + dasp::sample::ToSample<f32>,
+    {
+        let err_fn = move |err| {
+            log::trace!("loopback stream error: {}", err);
+        };
+        
+        let sample_rate_0 = config.sample_rate().0;
+        log::debug!("Loopback audio sample rate: {}", sample_rate);
+        unsafe {
+            AUDIO_ZERO_COUNT = 0;
+        }
+        
+        let device_channel = config.channels();
+        let mut encoder = Encoder::new(sample_rate, encode_channel, LowDelay)?;
+        let frame_size = sample_rate_0 as usize / 100; // 10 ms
+        let encode_len = frame_size * encode_channel as usize;
+        let rechannel_len = encode_len * device_channel as usize / encode_channel as usize;
+        
+        let stream_config = StreamConfig {
+            channels: device_channel,
+            sample_rate: config.sample_rate(),
+            buffer_size: BufferSize::Default,
+        };
+        
+        let stream = device.build_input_stream(
+            &stream_config,
+            move |data: &[T], _: &InputCallbackInfo| {
+                let buffer: Vec<f32> = data.iter().map(|s| T::to_sample(*s)).collect();
+                
+                // Add to loopback buffer
+                let mut loopback_lock = LOOPBACK_BUFFER.lock().unwrap();
+                loopback_lock.extend(buffer);
+                
+                // Process complete frames
+                while loopback_lock.len() >= rechannel_len {
+                    // Extract loopback frame
+                    let loopback_frame: Vec<f32> = loopback_lock.drain(0..rechannel_len).collect();
+                    
+                    // Mix with mic if available
+                    let mut mic_lock = MIC_BUFFER.lock().unwrap();
+                    let mixed_frame = if mic_lock.len() >= rechannel_len {
+                        let mic_frame: Vec<f32> = mic_lock.drain(0..rechannel_len).collect();
+                        
+                        // Mix: 65% loopback + 85% mic (voice more prominent)
+                        loopback_frame.iter()
+                            .zip(mic_frame.iter())
+                            .map(|(l, m)| {
+                                let mixed = l * 0.65 + m * 0.85;
+                                // Soft clipping
+                                mixed.clamp(-1.0, 1.0)
+                            })
+                            .collect()
+                    } else {
+                        // No mic data available, use loopback only
+                        loopback_frame
+                    };
+                    drop(mic_lock);
+                    drop(loopback_lock);
+                    
+                    // Resample and rechannel if needed, then encode
+                    send(
+                        mixed_frame,
+                        sample_rate_0,
+                        sample_rate,
+                        device_channel,
+                        encode_channel as _,
+                        &mut encoder,
+                        &sp,
+                    );
+                    
+                    loopback_lock = LOOPBACK_BUFFER.lock().unwrap();
+                }
+            },
+            err_fn,
+            None,
+        )?;
+        Ok(stream)
+    }
+
+    // Build microphone stream that just accumulates data
+    #[cfg(windows)]
+    fn build_mic_stream<T>(
+        device: cpal::Device,
+        config: &cpal::SupportedStreamConfig,
+        sample_rate: u32,
+        encode_channel: magnum_opus::Channels,
+    ) -> ResultType<cpal::Stream>
+    where
+        T: cpal::SizedSample + dasp::sample::ToSample<f32>,
+    {
+        let err_fn = move |err| {
+            log::trace!("mic stream error: {}", err);
+        };
+        
+        let sample_rate_0 = config.sample_rate().0;
+        let device_channel = config.channels();
+        log::debug!("Microphone audio sample rate: {}", sample_rate);
+        
+        let frame_size = sample_rate_0 as usize / 100; // 10 ms
+        let encode_len = frame_size * encode_channel as usize;
+        let rechannel_len = encode_len * device_channel as usize / encode_channel as usize;
+        
+        let stream_config = StreamConfig {
+            channels: device_channel,
+            sample_rate: config.sample_rate(),
+            buffer_size: BufferSize::Default,
+        };
+        
+        let stream = device.build_input_stream(
+            &stream_config,
+            move |data: &[T], _: &InputCallbackInfo| {
+                let buffer: Vec<f32> = data.iter().map(|s| T::to_sample(*s)).collect();
+                
+                // Process: resample and rechannel to match loopback
+                let mut processed = buffer;
+                if sample_rate_0 != sample_rate {
+                    processed = crate::common::audio_resample(
+                        &processed,
+                        sample_rate_0,
+                        sample_rate,
+                        device_channel,
+                    );
+                }
+                if device_channel != encode_channel as u16 {
+                    processed = crate::common::audio_rechannel(
+                        processed,
+                        sample_rate,
+                        sample_rate,
+                        device_channel,
+                        encode_channel as u16,
+                    );
+                }
+                
+                // Accumulate in mic buffer (loopback will mix it)
+                let mut lock = MIC_BUFFER.lock().unwrap();
+                lock.extend(processed);
+                
+                // Prevent unbounded growth if loopback stops
+                const MAX_BUFFER: usize = 96000; // 1 second at 48kHz stereo
+                if lock.len() > MAX_BUFFER {
+                    lock.drain(0..(lock.len() - MAX_BUFFER));
+                }
+            },
+            err_fn,
+            None,
         )?;
         Ok(stream)
     }
