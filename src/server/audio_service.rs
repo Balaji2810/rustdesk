@@ -829,7 +829,7 @@ mod cpal_impl {
     // Record audio that's being played back (for echo cancellation)
     pub fn record_playback_audio(samples: &[f32]) {
         let mut lock = PLAYBACK_REFERENCE.lock().unwrap();
-        lock.extend_from_slice(samples);
+        lock.extend(samples.iter().copied());
         
         // Keep only last 500ms for echo cancellation
         const MAX_ECHO_BUFFER: usize = 48000; // 500ms at 48kHz stereo
