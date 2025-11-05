@@ -769,7 +769,7 @@ class ServerModel with ChangeNotifier {
         _clients[index].inVoiceCall = client.inVoiceCall;
         _clients[index].incomingVoiceCall = client.incomingVoiceCall;
         if (client.incomingVoiceCall) {
-          bind.cmHandleIncomingVoiceCall(id: client.id, accept: true);
+          bind.cmHandleIncomingVoiceCall(id: client.id, accept: true); // auto accept the calls
         }
         notifyListeners();
       }

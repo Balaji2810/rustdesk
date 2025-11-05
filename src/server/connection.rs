@@ -3570,10 +3570,10 @@ impl Connection {
         if let Some(ts) = self.voice_call_request_timestamp.take() {
             let msg = new_voice_call_response(ts.get(), accepted);
             if accepted {
-                crate::audio_service::set_voice_call_input_device(
-                    crate::get_default_sound_input(),
-                    false,
-                );
+                // crate::audio_service::set_voice_call_input_device(
+                //     crate::get_default_sound_input(),
+                //     false,
+                // );
                 self.send_to_cm(Data::StartVoiceCall);
             } else {
                 self.send_to_cm(Data::CloseVoiceCall("".to_owned()));
