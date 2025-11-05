@@ -1568,7 +1568,7 @@ pub fn main_set_mic_input(_device: String) {
 pub fn main_get_mic_input() -> String {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        Config::get_option("mic-input")
+        config::Config::get_option("mic-input")
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     "".to_owned()
