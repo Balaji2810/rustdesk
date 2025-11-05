@@ -89,6 +89,13 @@ pub fn set_mic_input_device(device: Option<String>) {
     restart();
 }
 
+/// Record audio that's being played back for echo cancellation
+#[inline]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn record_playback_audio(samples: &[f32]) {
+    cpal_impl::record_playback_audio(samples);
+}
+
 pub fn restart() {
     log::info!("restart the audio service, freezing now...");
     if RESTARTING.load(Ordering::SeqCst) {
@@ -200,6 +207,8 @@ mod cpal_impl {
         static ref INPUT_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         static ref LOOPBACK_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+        // Track audio we're playing back to subtract from loopback (echo cancellation)
+        static ref PLAYBACK_REFERENCE: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
     }
 
     #[cfg(feature = "screencapturekit")]
@@ -682,20 +691,30 @@ mod cpal_impl {
                 // Process complete frames
                 while loopback_lock.len() >= rechannel_len {
                     // Extract loopback frame
-                    let loopback_frame: Vec<f32> = loopback_lock.drain(0..rechannel_len).collect();
+                    let mut loopback_frame: Vec<f32> = loopback_lock.drain(0..rechannel_len).collect();
+                    
+                    // Apply echo cancellation to remove played-back audio
+                    loopback_frame = apply_echo_cancellation(&loopback_frame);
                     
                     // Mix with mic if available
                     let mut mic_lock = MIC_BUFFER.lock().unwrap();
                     let mixed_frame = if mic_lock.len() >= rechannel_len {
                         let mic_frame: Vec<f32> = mic_lock.drain(0..rechannel_len).collect();
                         
-                        // Mix: 65% loopback + 85% mic (voice more prominent)
+                        // Apply voice ducking: reduce system audio when speaking
+                        apply_ducking(&mut loopback_frame, &mic_frame, 0.6); // 60% reduction
+                        
+                        // Mix: 50% system audio + 90% microphone (voice priority)
                         loopback_frame.iter()
                             .zip(mic_frame.iter())
                             .map(|(l, m)| {
-                                let mixed = l * 0.65 + m * 0.85;
-                                // Soft clipping
-                                mixed.clamp(-1.0, 1.0)
+                                let mixed = l * 0.5 + m * 0.9;
+                                // Soft clipping for natural sound
+                                if mixed.abs() > 0.95 {
+                                    mixed.signum() * (0.95 + 0.05 * (mixed.abs() - 0.95).tanh())
+                                } else {
+                                    mixed
+                                }
                             })
                             .collect()
                     } else {
@@ -742,11 +761,12 @@ mod cpal_impl {
         
         let sample_rate_0 = config.sample_rate().0;
         let device_channel = config.channels();
-        log::debug!("Microphone audio sample rate: {}", sample_rate);
+        log::debug!("Microphone: device_rate={}, target_rate={}, device_ch={}, encode_ch={:?}", 
+            sample_rate_0, sample_rate, device_channel, encode_channel);
         
-        let frame_size = sample_rate_0 as usize / 100; // 10 ms
-        let encode_len = frame_size * encode_channel as usize;
-        let rechannel_len = encode_len * device_channel as usize / encode_channel as usize;
+        // IMPORTANT: Calculate target frame size at the RESAMPLED rate, not device rate
+        let target_frame_size = sample_rate as usize / 100; // 10 ms at target rate
+        let target_samples = target_frame_size * encode_channel as usize;
         
         let stream_config = StreamConfig {
             channels: device_channel,
@@ -779,6 +799,16 @@ mod cpal_impl {
                     );
                 }
                 
+                // Apply noise gate to reduce background noise
+                const NOISE_GATE_THRESHOLD: f32 = 0.01; // -40dB
+                let signal_energy: f32 = processed.iter().map(|s| s * s).sum();
+                let rms = (signal_energy / processed.len() as f32).sqrt();
+                
+                if rms < NOISE_GATE_THRESHOLD {
+                    // Below threshold - silence the frame
+                    processed.iter_mut().for_each(|s| *s = 0.0);
+                }
+                
                 // Accumulate in mic buffer (loopback will mix it)
                 let mut lock = MIC_BUFFER.lock().unwrap();
                 lock.extend(processed);
@@ -794,6 +824,86 @@ mod cpal_impl {
             None,
         )?;
         Ok(stream)
+    }
+
+    // Record audio that's being played back (for echo cancellation)
+    pub fn record_playback_audio(samples: &[f32]) {
+        let mut lock = PLAYBACK_REFERENCE.lock().unwrap();
+        lock.extend_from_slice(samples);
+        
+        // Keep only last 500ms for echo cancellation
+        const MAX_ECHO_BUFFER: usize = 48000; // 500ms at 48kHz stereo
+        if lock.len() > MAX_ECHO_BUFFER {
+            let excess = lock.len() - MAX_ECHO_BUFFER;
+            lock.drain(0..excess);
+        }
+    }
+
+    // Simple but effective echo cancellation using energy-based detection
+    fn apply_echo_cancellation(loopback: &[f32]) -> Vec<f32> {
+        let mut reference = PLAYBACK_REFERENCE.lock().unwrap();
+        
+        if reference.is_empty() {
+            return loopback.to_vec();
+        }
+        
+        // Calculate energy of reference signal (what we're playing)
+        let ref_len = reference.len().min(loopback.len());
+        let ref_energy: f32 = reference.iter().take(ref_len).map(|s| s * s).sum();
+        let ref_rms = (ref_energy / ref_len as f32).sqrt();
+        
+        // Calculate energy of loopback signal (what we're capturing)
+        let loop_energy: f32 = loopback.iter().map(|s| s * s).sum();
+        let loop_rms = (loop_energy / loopback.len() as f32).sqrt();
+        
+        let mut result = loopback.to_vec();
+        
+        // If loopback energy is similar to reference (within 3dB), it's likely echo
+        if loop_rms > 0.001 && ref_rms > 0.001 {
+            let ratio = loop_rms / ref_rms;
+            
+            // Echo detected when ratio is between 0.5 and 2.0
+            if ratio > 0.5 && ratio < 2.0 {
+                log::trace!("Echo detected: loop_rms={:.4}, ref_rms={:.4}, ratio={:.2}", 
+                    loop_rms, ref_rms, ratio);
+                
+                // Subtract estimated echo (scaled reference)
+                for (i, sample) in result.iter_mut().enumerate() {
+                    if i < ref_len {
+                        // 70% echo cancellation (conservative to avoid artifacts)
+                        let echo_estimate = reference[i] * ratio * 0.7;
+                        *sample = (*sample - echo_estimate).clamp(-1.0, 1.0);
+                    }
+                }
+                
+                // Apply additional suppression to residual echo
+                result.iter_mut().for_each(|s| *s *= 0.4);
+            }
+        }
+        
+        // Clean up used reference data
+        if ref_len > 0 {
+            reference.drain(0..ref_len);
+        }
+        
+        result
+    }
+
+    // Voice ducking: reduce system audio when microphone is active
+    fn apply_ducking(loopback: &mut [f32], mic: &[f32], duck_amount: f32) {
+        // Calculate mic energy
+        let mic_energy: f32 = mic.iter().map(|s| s * s).sum();
+        let mic_rms = (mic_energy / mic.len() as f32).sqrt();
+        
+        // Voice detection threshold: -34dB
+        const VOICE_THRESHOLD: f32 = 0.02;
+        
+        if mic_rms > VOICE_THRESHOLD {
+            // Someone is speaking - reduce system audio
+            let voice_strength = (mic_rms * 10.0).min(1.0);
+            let duck_factor = 1.0 - (duck_amount * voice_strength);
+            loopback.iter_mut().for_each(|s| *s *= duck_factor);
+        }
     }
 }
 

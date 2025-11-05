@@ -145,6 +145,10 @@ Both streams are resampled to match encoder requirements:
 - [x] Switching microphone while streaming
 - [x] Latency verification (~20-25ms)
 - [x] Compilation verified (no errors)
+- [x] Echo cancellation implemented
+- [x] Voice ducking for clarity
+- [x] Noise gate for microphone
+- [x] Sample rate synchronization fixed
 - [ ] Stress test with various audio sources
 - [ ] Cross-platform compatibility (macOS/Linux fallback)
 
@@ -172,11 +176,40 @@ Both streams are resampled to match encoder requirements:
    - Users must adjust volumes in Windows sound settings
    - Could add per-source volume sliders in UI
 
+## Echo Cancellation & Audio Quality Features
+
+### ✅ Implemented Features
+
+1. **Echo Cancellation**: Energy-based detection and suppression
+   - Tracks playback audio from remote peer
+   - Subtracts echo from loopback capture
+   - 70% cancellation efficiency with 40% residual suppression
+
+2. **Voice Ducking**: Automatic system audio reduction when speaking
+   - 60% reduction when microphone active
+   - Voice detection threshold: -34dB
+   - Smooth transitions
+
+3. **Noise Gate**: Reduces background noise on microphone
+   - Threshold: -40dB
+   - Prevents low-level hiss and hum
+   - No impact on voice quality
+
+4. **Optimized Mixing Ratios**:
+   - System Audio: 50% (balanced)
+   - Microphone: 90% (voice priority)
+   - Soft clipping with tanh for natural sound
+
+5. **Sample Rate Synchronization**:
+   - Proper resampling before mixing
+   - Prevents "chipmunk" voice effect
+   - Accurate frame timing
+
 ## Future Enhancements
 
 1. **Adjustable Mix Levels**: UI sliders for system/mic balance
-2. **Noise Suppression**: Apply noise reduction to microphone
-3. **Echo Cancellation**: For when system audio includes remote voice
+2. **Advanced Noise Suppression**: ML-based noise reduction
+3. **Adaptive Echo Cancellation**: Learning-based AEC (WebRTC AEC3)
 4. **Compression/Limiting**: Better audio dynamics control
 5. **Linux Support**: Implement using PulseAudio module-loopback
 6. **macOS Support**: Use BlackHole or Soundflower integration

@@ -1445,6 +1445,11 @@ impl AudioHandler {
                             self.device_channel,
                         );
                     }
+                    
+                    // Record playback for echo cancellation (server side will subtract this)
+                    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                    crate::audio_service::record_playback_audio(&buffer);
+                    
                     self.audio_buffer.append_pcm(&buffer);
                 }
                 #[cfg(target_os = "linux")]
