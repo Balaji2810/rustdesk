@@ -24,11 +24,11 @@ static RESTARTING: AtomicBool = AtomicBool::new(false);
 
 lazy_static::lazy_static! {
     static ref VOICE_CALL_INPUT_DEVICE: Arc::<Mutex::<Option<String>>> = Default::default();
-    // Client-side AEC state and reference audio buffer for echo cancellation
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    static ref CLIENT_AEC_STATE: Arc<Mutex<Option<aec_rs::AEC>>> = Arc::new(Mutex::new(None));
+    // Client-side echo suppression: reference audio buffer and energy tracking
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     static ref CLIENT_REFERENCE_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    static ref CLIENT_REFERENCE_ENERGY: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -84,62 +84,54 @@ pub fn restart() {
 // This is the far-end signal that will echo back through remote speakers -> remote mic -> client speakers
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub fn store_client_mic_reference(audio_data: &[f32]) {
-    let mut buffer = CLIENT_REFERENCE_BUFFER.lock().unwrap();
-    buffer.extend(audio_data.iter());
-    // Limit buffer size to prevent memory growth (max 500ms at 48kHz stereo)
-    let max_size = 48000 * 2 / 2; // 500ms
-    if buffer.len() > max_size {
-        let excess = buffer.len() - max_size;
-        buffer.drain(0..excess);
+    // Calculate RMS energy of the microphone signal
+    let mut energy = 0.0f32;
+    for sample in audio_data {
+        energy += sample * sample;
     }
+    energy = (energy / audio_data.len() as f32).sqrt();
+    
+    // Update the reference energy with smoothing (exponential moving average)
+    let mut ref_energy = CLIENT_REFERENCE_ENERGY.lock().unwrap();
+    *ref_energy = *ref_energy * 0.95 + energy * 0.05;
 }
 
-// Client-side: Apply AEC to incoming audio from remote
+// Client-side: Apply adaptive gain-based echo suppression to incoming audio from remote
+// This uses a simpler approach than full AEC but is more reliable and cross-platform
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-pub fn apply_client_aec_to_playback(audio_data: &mut Vec<f32>) {
-    let mut aec_guard = CLIENT_AEC_STATE.lock().unwrap();
-    let mut ref_buffer = CLIENT_REFERENCE_BUFFER.lock().unwrap();
+pub fn apply_client_echo_suppression(audio_data: &mut Vec<f32>) {
+    let ref_energy = *CLIENT_REFERENCE_ENERGY.lock().unwrap();
     
-    // Initialize AEC if not already initialized
-    if aec_guard.is_none() {
-        *aec_guard = Some(aec_rs::AEC::new(128));
-        log::info!("Initialized client-side AEC for playback");
+    // Calculate energy of incoming audio
+    let mut incoming_energy = 0.0f32;
+    for sample in audio_data.iter() {
+        incoming_energy += sample * sample;
     }
+    incoming_energy = (incoming_energy / audio_data.len() as f32).sqrt();
     
-    if let Some(aec) = aec_guard.as_mut() {
-        let aec_frame_size = 128;
-        let mut aec_output = Vec::new();
-        let mut processed = 0;
+    // If reference energy is high (we're talking), suppress the incoming audio more
+    // to reduce echo. Otherwise, let it through with less suppression.
+    let suppression_factor = if ref_energy > 0.01 {
+        // We're actively sending audio - likely echo in the return path
+        // Calculate adaptive gain based on energy ratio
+        let energy_ratio = incoming_energy / (ref_energy + 0.001);
         
-        while processed + aec_frame_size <= audio_data.len() {
-            // Get reference audio (far-end) - our mic input that was sent to remote
-            let mut far_end = vec![0.0f32; aec_frame_size];
-            if ref_buffer.len() >= aec_frame_size {
-                for i in 0..aec_frame_size {
-                    far_end[i] = ref_buffer.pop_front().unwrap_or(0.0);
-                }
-            }
-            
-            // Get incoming audio (near-end) - audio from remote that may contain echo
-            let mut near_end = audio_data[processed..processed + aec_frame_size].to_vec();
-            
-            // Process through AEC to remove echo
-            aec.process(&mut far_end, &mut near_end);
-            
-            // Add processed samples
-            aec_output.extend_from_slice(&near_end);
-            processed += aec_frame_size;
+        // If incoming energy is similar to our reference (likely echo), suppress more
+        if energy_ratio < 2.0 {
+            // Likely echo - apply strong suppression
+            0.2 // 80% suppression
+        } else {
+            // Different signal - probably remote person talking - less suppression
+            0.7 // 30% suppression
         }
-        
-        // Add remaining samples without AEC
-        if processed < audio_data.len() {
-            aec_output.extend_from_slice(&audio_data[processed..]);
-        }
-        
-        // Replace with AEC output if we processed something
-        if !aec_output.is_empty() {
-            *audio_data = aec_output;
-        }
+    } else {
+        // We're not sending audio - minimal suppression
+        0.95 // 5% suppression
+    };
+    
+    // Apply the suppression factor
+    for sample in audio_data.iter_mut() {
+        *sample *= suppression_factor;
     }
 }
 
@@ -248,8 +240,6 @@ mod cpal_impl {
         static ref LOOPBACK_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         #[cfg(windows)]
         static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
-        #[cfg(windows)]
-        static ref AEC_STATE: Arc<Mutex<Option<aec_rs::AEC>>> = Arc::new(Mutex::new(None));
     }
 
     #[cfg(feature = "screencapturekit")]
@@ -422,57 +412,46 @@ mod cpal_impl {
             return;
         }
 
-        // Initialize AEC if not already initialized
-        // AEC frame size is 128 samples for 48kHz stereo (about 1.3ms)
-        let mut aec_guard = AEC_STATE.lock().unwrap();
-        if aec_guard.is_none() {
-            // Initialize AEC with frame size 128 for 48kHz audio
-            *aec_guard = Some(aec_rs::AEC::new(128));
-            log::info!("Initialized AEC for server-side audio mixing");
+        // Calculate energies for adaptive echo suppression
+        let mut loopback_energy = 0.0f32;
+        let mut mic_energy = 0.0f32;
+        for i in 0..min_len {
+            let lb = loopback_resampled[i];
+            let mc = mic_resampled[i];
+            loopback_energy += lb * lb;
+            mic_energy += mc * mc;
         }
+        loopback_energy = (loopback_energy / min_len as f32).sqrt();
+        mic_energy = (mic_energy / min_len as f32).sqrt();
         
-        // Apply AEC to remove echo from the loopback in the microphone signal
-        // loopback_resampled is the "far-end" (what's being played and potentially echoing back)
-        // mic_resampled is the "near-end" (microphone input that may contain echo)
-        let mut mic_after_aec = Vec::with_capacity(min_len);
-        
-        if let Some(aec) = aec_guard.as_mut() {
-            // Process in chunks of 128 samples (AEC frame size)
-            let aec_frame_size = 128;
-            let mut processed = 0;
+        // Apply adaptive suppression to mic if loopback energy is high
+        // This reduces echo when the client is playing audio
+        let mut mic_processed = Vec::with_capacity(min_len);
+        if loopback_energy > 0.01 {
+            // Loopback is active - calculate suppression factor
+            let energy_ratio = mic_energy / (loopback_energy + 0.001);
+            let suppression = if energy_ratio < 1.5 {
+                // Mic energy similar to loopback - likely echo, suppress more
+                0.3 // 70% suppression
+            } else {
+                // Mic has different signal - less suppression
+                0.7 // 30% suppression
+            };
             
-            while processed + aec_frame_size <= min_len {
-                let far_end = &loopback_resampled[processed..processed + aec_frame_size];
-                let near_end = &mic_resampled[processed..processed + aec_frame_size];
-                
-                // Convert to Vec for AEC processing
-                let mut far_vec = far_end.to_vec();
-                let mut near_vec = near_end.to_vec();
-                
-                // Process through AEC
-                aec.process(&mut far_vec, &mut near_vec);
-                
-                // Add processed samples to output
-                mic_after_aec.extend_from_slice(&near_vec);
-                processed += aec_frame_size;
-            }
-            
-            // Handle remaining samples without AEC
-            if processed < min_len {
-                mic_after_aec.extend_from_slice(&mic_resampled[processed..min_len]);
+            for &sample in mic_resampled[..min_len].iter() {
+                mic_processed.push(sample * suppression);
             }
         } else {
-            // Fallback if AEC fails to initialize
-            mic_after_aec = mic_resampled[..min_len].to_vec();
+            // Loopback not active - minimal suppression
+            mic_processed = mic_resampled[..min_len].to_vec();
         }
-        drop(aec_guard);
 
         // Mix the two sources together with adjusted gain control
         // Loopback gets 70% gain, mic gets 30% gain (as requested by user)
         let mut mixed = Vec::with_capacity(min_len);
         for i in 0..min_len {
             let loopback_val = loopback_resampled.get(i).copied().unwrap_or(0.0);
-            let mic_val = mic_after_aec.get(i).copied().unwrap_or(0.0);
+            let mic_val = mic_processed.get(i).copied().unwrap_or(0.0);
             // Mix with loopback priority (70%) and mic (30%)
             let mixed_val = (loopback_val * 0.7) + (mic_val * 0.3);
             // Clamp to [-1.0, 1.0] range
@@ -654,9 +633,6 @@ mod cpal_impl {
         // Clear buffers
         LOOPBACK_BUFFER.lock().unwrap().clear();
         MIC_BUFFER.lock().unwrap().clear();
-        
-        // Reset AEC state
-        *AEC_STATE.lock().unwrap() = None;
         
         unsafe {
             AUDIO_ZERO_COUNT = 0;

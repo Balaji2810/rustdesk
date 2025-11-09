@@ -34,25 +34,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f26201604c87b1e01bd3d98f8d5d9a8fcbb815e8cedb41ffccbeb4bf593a35fe"
 
 [[package]]
-name = "aec-rs"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a29fe818a51afe509fa7b46256a9fbe10ad1c4f0bf1bc9799835290fe6b817"
-dependencies = [
- "aec-rs-sys",
-]
-
-[[package]]
-name = "aec-rs-sys"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5562eb866eb9f9b1ba03206625b20146e5198a33240983d85c11eb8e1b7397b0"
-dependencies = [
- "bindgen 0.69.4",
- "cmake",
-]
-
-[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -674,15 +655,12 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "lazycell",
- "log",
- "prettyplease",
  "proc-macro2 1.0.93",
  "quote 1.0.36",
  "regex",
  "rustc-hash 1.1.0",
  "shlex",
  "syn 2.0.98",
- "which",
 ]
 
 [[package]]
@@ -6551,7 +6529,6 @@ dependencies = [
 name = "rustdesk"
 version = "1.4.3"
 dependencies = [
- "aec-rs",
  "android-wakelock",
  "android_logger",
  "arboard",
