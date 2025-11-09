@@ -352,13 +352,15 @@ mod cpal_impl {
             return;
         }
 
-        // Mix the two sources together (simple addition with normalization to prevent clipping)
+        // Mix the two sources together with better gain control
+        // Mic gets higher priority (0.7 gain) to reduce echo, loopback gets lower (0.3 gain)
+        // This helps prevent feedback from client audio being captured in loopback
         let mut mixed = Vec::with_capacity(min_len);
         for i in 0..min_len {
             let loopback_val = loopback_resampled.get(i).copied().unwrap_or(0.0);
             let mic_val = mic_resampled.get(i).copied().unwrap_or(0.0);
-            // Mix with 0.5 gain each to prevent clipping, then normalize if needed
-            let mixed_val = (loopback_val * 0.5) + (mic_val * 0.5);
+            // Mix with mic priority to reduce echo/feedback
+            let mixed_val = (loopback_val * 0.3) + (mic_val * 0.7);
             // Clamp to [-1.0, 1.0] range
             mixed.push(mixed_val.max(-1.0).min(1.0));
         }
@@ -745,57 +747,80 @@ mod cpal_impl {
                 if is_loopback {
                     let mut lock = LOOPBACK_BUFFER.lock().unwrap();
                     lock.extend(buffer);
+                    // Limit buffer size to prevent excessive delay (max 50ms of audio at device sample rate)
+                    let max_buffer_size = (loopback_sample_rate_0 as usize / 20) * loopback_device_channel as usize;
+                    if lock.len() > max_buffer_size {
+                        let excess = lock.len() - max_buffer_size;
+                        lock.drain(0..excess);
+                    }
                     drop(lock);
                 } else {
                     let mut lock = MIC_BUFFER.lock().unwrap();
                     lock.extend(buffer);
+                    // Limit buffer size to prevent excessive delay (max 50ms of audio at device sample rate)
+                    let max_buffer_size = (mic_sample_rate_0 as usize / 20) * mic_device_channel as usize;
+                    if lock.len() > max_buffer_size {
+                        let excess = lock.len() - max_buffer_size;
+                        lock.drain(0..excess);
+                    }
                     drop(lock);
                 }
                 
-                // Trigger mixing when we have enough data in both buffers
+                // Process mixing more frequently - check both buffers independently
+                // Use smaller frame sizes to reduce latency (5ms instead of 10ms)
+                let small_frame_size = target_sample_rate as usize / 200; // 5 ms for lower latency
+                let small_encode_len = small_frame_size * encode_channel as usize;
+                let loopback_small_len = small_encode_len * loopback_device_channel as usize / encode_channel as usize;
+                let mic_small_len = small_encode_len * mic_device_channel as usize / encode_channel as usize;
+                
                 let loopback_lock = LOOPBACK_BUFFER.lock().unwrap();
                 let mic_lock = MIC_BUFFER.lock().unwrap();
                 
-                // Calculate the required lengths for both buffers
-                let loopback_rechannel_len = if is_loopback {
-                    this_device_rechannel_len
-                } else {
-                    other_device_rechannel_len
-                };
-                let mic_rechannel_len = if is_loopback {
-                    other_device_rechannel_len
-                } else {
-                    this_device_rechannel_len
-                };
+                // Process when we have at least one complete frame from each buffer
+                // This reduces delay compared to waiting for both to have full frames
+                let loopback_available = loopback_lock.len();
+                let mic_available = mic_lock.len();
                 
-                // Check if we have enough data in both buffers
-                if loopback_lock.len() >= loopback_rechannel_len && mic_lock.len() >= mic_rechannel_len {
-                    drop(loopback_lock);
-                    drop(mic_lock);
-                    
-                    // Extract frames from both buffers
+                // Use the minimum available frame count to keep them synchronized
+                let loopback_frames = loopback_available / loopback_small_len;
+                let mic_frames = mic_available / mic_small_len;
+                let frames_to_process = std::cmp::min(loopback_frames, mic_frames);
+                
+                drop(loopback_lock);
+                drop(mic_lock);
+                
+                // Process available frames to reduce delay
+                if frames_to_process > 0 {
                     let mut loopback_lock = LOOPBACK_BUFFER.lock().unwrap();
                     let mut mic_lock = MIC_BUFFER.lock().unwrap();
                     
-                    let loopback_frame: Vec<f32> = loopback_lock.drain(0..loopback_rechannel_len).collect();
-                    let mic_frame: Vec<f32> = mic_lock.drain(0..mic_rechannel_len).collect();
+                    let loopback_frame_len = loopback_small_len * frames_to_process;
+                    let mic_frame_len = mic_small_len * frames_to_process;
                     
-                    drop(loopback_lock);
-                    drop(mic_lock);
-                    
-                    // Mix and send
-                    mix_and_send(
-                        loopback_frame,
-                        loopback_sample_rate_0,
-                        loopback_device_channel,
-                        mic_frame,
-                        mic_sample_rate_0,
-                        mic_device_channel,
-                        target_sample_rate,
-                        encode_channel,
-                        encoder_clone.clone(),
-                        &sp_clone,
-                    );
+                    if loopback_lock.len() >= loopback_frame_len && mic_lock.len() >= mic_frame_len {
+                        let loopback_frame: Vec<f32> = loopback_lock.drain(0..loopback_frame_len).collect();
+                        let mic_frame: Vec<f32> = mic_lock.drain(0..mic_frame_len).collect();
+                        
+                        drop(loopback_lock);
+                        drop(mic_lock);
+                        
+                        // Mix and send
+                        mix_and_send(
+                            loopback_frame,
+                            loopback_sample_rate_0,
+                            loopback_device_channel,
+                            mic_frame,
+                            mic_sample_rate_0,
+                            mic_device_channel,
+                            target_sample_rate,
+                            encode_channel,
+                            encoder_clone.clone(),
+                            &sp_clone,
+                        );
+                    } else {
+                        drop(loopback_lock);
+                        drop(mic_lock);
+                    }
                 }
             },
             err_fn,
