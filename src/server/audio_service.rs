@@ -588,7 +588,8 @@ mod cpal_impl {
         #[cfg(windows)]
         {
             // On Windows, use mixing mode to combine loopback and mic
-            return play_mixed(sp);
+            let (loopback_stream, _mic_stream, format) = play_mixed(sp)?;
+            return Ok((loopback_stream, format));
         }
         
         #[cfg(not(windows))]
@@ -741,14 +742,15 @@ mod cpal_impl {
             &stream_config,
             move |data: &[T], _: &InputCallbackInfo| {
                 let buffer: Vec<f32> = data.iter().map(|s| T::to_sample(*s)).collect();
-                let target_buffer = if is_loopback {
-                    &LOOPBACK_BUFFER
+                if is_loopback {
+                    let mut lock = LOOPBACK_BUFFER.lock().unwrap();
+                    lock.extend(buffer);
+                    drop(lock);
                 } else {
-                    &MIC_BUFFER
-                };
-                let mut lock = target_buffer.lock().unwrap();
-                lock.extend(buffer);
-                drop(lock);
+                    let mut lock = MIC_BUFFER.lock().unwrap();
+                    lock.extend(buffer);
+                    drop(lock);
+                }
                 
                 // Trigger mixing when we have enough data in both buffers
                 let loopback_lock = LOOPBACK_BUFFER.lock().unwrap();
