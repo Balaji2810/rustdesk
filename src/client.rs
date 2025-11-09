@@ -1445,6 +1445,11 @@ impl AudioHandler {
                             self.device_channel,
                         );
                     }
+                    
+                    // Apply AEC to incoming audio from remote
+                    // This removes the echo of our mic input that was played on remote and sent back
+                    crate::audio_service::apply_client_aec_to_playback(&mut buffer);
+                    
                     self.audio_buffer.append_pcm(&buffer);
                 }
                 #[cfg(target_os = "linux")]

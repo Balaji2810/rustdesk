@@ -24,6 +24,11 @@ static RESTARTING: AtomicBool = AtomicBool::new(false);
 
 lazy_static::lazy_static! {
     static ref VOICE_CALL_INPUT_DEVICE: Arc::<Mutex::<Option<String>>> = Default::default();
+    // Client-side AEC state and reference audio buffer for echo cancellation
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    static ref CLIENT_AEC_STATE: Arc<Mutex<Option<aec_rs::AEC>>> = Arc::new(Mutex::new(None));
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    static ref CLIENT_REFERENCE_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -73,6 +78,69 @@ pub fn restart() {
         return;
     }
     RESTARTING.store(true, Ordering::SeqCst);
+}
+
+// Client-side: Store reference audio (microphone input being sent to remote)
+// This is the far-end signal that will echo back through remote speakers -> remote mic -> client speakers
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn store_client_mic_reference(audio_data: &[f32]) {
+    let mut buffer = CLIENT_REFERENCE_BUFFER.lock().unwrap();
+    buffer.extend(audio_data.iter());
+    // Limit buffer size to prevent memory growth (max 500ms at 48kHz stereo)
+    let max_size = 48000 * 2 / 2; // 500ms
+    if buffer.len() > max_size {
+        let excess = buffer.len() - max_size;
+        buffer.drain(0..excess);
+    }
+}
+
+// Client-side: Apply AEC to incoming audio from remote
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn apply_client_aec_to_playback(audio_data: &mut Vec<f32>) {
+    let mut aec_guard = CLIENT_AEC_STATE.lock().unwrap();
+    let mut ref_buffer = CLIENT_REFERENCE_BUFFER.lock().unwrap();
+    
+    // Initialize AEC if not already initialized
+    if aec_guard.is_none() {
+        *aec_guard = Some(aec_rs::AEC::new(128));
+        log::info!("Initialized client-side AEC for playback");
+    }
+    
+    if let Some(aec) = aec_guard.as_mut() {
+        let aec_frame_size = 128;
+        let mut aec_output = Vec::new();
+        let mut processed = 0;
+        
+        while processed + aec_frame_size <= audio_data.len() {
+            // Get reference audio (far-end) - our mic input that was sent to remote
+            let mut far_end = vec![0.0f32; aec_frame_size];
+            if ref_buffer.len() >= aec_frame_size {
+                for i in 0..aec_frame_size {
+                    far_end[i] = ref_buffer.pop_front().unwrap_or(0.0);
+                }
+            }
+            
+            // Get incoming audio (near-end) - audio from remote that may contain echo
+            let mut near_end = audio_data[processed..processed + aec_frame_size].to_vec();
+            
+            // Process through AEC to remove echo
+            aec.process(&mut far_end, &mut near_end);
+            
+            // Add processed samples
+            aec_output.extend_from_slice(&near_end);
+            processed += aec_frame_size;
+        }
+        
+        // Add remaining samples without AEC
+        if processed < audio_data.len() {
+            aec_output.extend_from_slice(&audio_data[processed..]);
+        }
+        
+        // Replace with AEC output if we processed something
+        if !aec_output.is_empty() {
+            *audio_data = aec_output;
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -180,6 +248,8 @@ mod cpal_impl {
         static ref LOOPBACK_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         #[cfg(windows)]
         static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+        #[cfg(windows)]
+        static ref AEC_STATE: Arc<Mutex<Option<aec_rs::AEC>>> = Arc::new(Mutex::new(None));
     }
 
     #[cfg(feature = "screencapturekit")]
@@ -352,15 +422,59 @@ mod cpal_impl {
             return;
         }
 
-        // Mix the two sources together with better gain control
-        // Mic gets higher priority (0.7 gain) to reduce echo, loopback gets lower (0.3 gain)
-        // This helps prevent feedback from client audio being captured in loopback
+        // Initialize AEC if not already initialized
+        // AEC frame size is 128 samples for 48kHz stereo (about 1.3ms)
+        let mut aec_guard = AEC_STATE.lock().unwrap();
+        if aec_guard.is_none() {
+            // Initialize AEC with frame size 128 for 48kHz audio
+            *aec_guard = Some(aec_rs::AEC::new(128));
+            log::info!("Initialized AEC for server-side audio mixing");
+        }
+        
+        // Apply AEC to remove echo from the loopback in the microphone signal
+        // loopback_resampled is the "far-end" (what's being played and potentially echoing back)
+        // mic_resampled is the "near-end" (microphone input that may contain echo)
+        let mut mic_after_aec = Vec::with_capacity(min_len);
+        
+        if let Some(aec) = aec_guard.as_mut() {
+            // Process in chunks of 128 samples (AEC frame size)
+            let aec_frame_size = 128;
+            let mut processed = 0;
+            
+            while processed + aec_frame_size <= min_len {
+                let far_end = &loopback_resampled[processed..processed + aec_frame_size];
+                let near_end = &mic_resampled[processed..processed + aec_frame_size];
+                
+                // Convert to Vec for AEC processing
+                let mut far_vec = far_end.to_vec();
+                let mut near_vec = near_end.to_vec();
+                
+                // Process through AEC
+                aec.process(&mut far_vec, &mut near_vec);
+                
+                // Add processed samples to output
+                mic_after_aec.extend_from_slice(&near_vec);
+                processed += aec_frame_size;
+            }
+            
+            // Handle remaining samples without AEC
+            if processed < min_len {
+                mic_after_aec.extend_from_slice(&mic_resampled[processed..min_len]);
+            }
+        } else {
+            // Fallback if AEC fails to initialize
+            mic_after_aec = mic_resampled[..min_len].to_vec();
+        }
+        drop(aec_guard);
+
+        // Mix the two sources together with adjusted gain control
+        // Loopback gets 70% gain, mic gets 30% gain (as requested by user)
         let mut mixed = Vec::with_capacity(min_len);
         for i in 0..min_len {
             let loopback_val = loopback_resampled.get(i).copied().unwrap_or(0.0);
-            let mic_val = mic_resampled.get(i).copied().unwrap_or(0.0);
-            // Mix with mic priority to reduce echo/feedback
-            let mixed_val = (loopback_val * 0.3) + (mic_val * 0.7);
+            let mic_val = mic_after_aec.get(i).copied().unwrap_or(0.0);
+            // Mix with loopback priority (70%) and mic (30%)
+            let mixed_val = (loopback_val * 0.7) + (mic_val * 0.3);
             // Clamp to [-1.0, 1.0] range
             mixed.push(mixed_val.max(-1.0).min(1.0));
         }
@@ -541,6 +655,9 @@ mod cpal_impl {
         LOOPBACK_BUFFER.lock().unwrap().clear();
         MIC_BUFFER.lock().unwrap().clear();
         
+        // Reset AEC state
+        *AEC_STATE.lock().unwrap() = None;
+        
         unsafe {
             AUDIO_ZERO_COUNT = 0;
         }
@@ -664,6 +781,7 @@ mod cpal_impl {
         let encode_len = frame_size * encode_channel as usize;
         let rechannel_len = encode_len * device_channel as usize / encode_channel as usize;
         INPUT_BUFFER.lock().unwrap().clear();
+        
         let timeout = None;
         let stream_config = StreamConfig {
             channels: device_channel,
@@ -678,15 +796,30 @@ mod cpal_impl {
                 lock.extend(buffer);
                 while lock.len() >= rechannel_len {
                     let frame: Vec<f32> = lock.drain(0..rechannel_len).collect();
-                    send(
-                        frame,
-                        sample_rate_0,
-                        sample_rate,
-                        device_channel,
-                        encode_channel as _,
-                        &mut encoder,
-                        &sp,
-                    );
+                    
+                    // Resample and rechannel to match target format
+                    let mut processed_frame = if sample_rate_0 != sample_rate {
+                        crate::common::audio_resample(&frame, sample_rate_0, sample_rate, device_channel)
+                    } else {
+                        frame.clone()
+                    };
+                    
+                    if device_channel != encode_channel as u16 {
+                        processed_frame = crate::common::audio_rechannel(
+                            processed_frame,
+                            sample_rate,
+                            sample_rate,
+                            device_channel,
+                            encode_channel as u16,
+                        );
+                    }
+                    
+                    // Store microphone input as reference for client-side AEC
+                    // This will be used to remove echo when it comes back from remote
+                    super::store_client_mic_reference(&processed_frame);
+                    
+                    // Send the audio (no AEC applied here on client mic input)
+                    send_f32(&processed_frame, &mut encoder, &sp);
                 }
             },
             err_fn,
