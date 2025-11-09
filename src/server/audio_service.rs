@@ -109,24 +109,35 @@ pub fn apply_client_echo_suppression(audio_data: &mut Vec<f32>) {
     }
     incoming_energy = (incoming_energy / audio_data.len() as f32).sqrt();
     
+    // Noise gate - completely mute very quiet audio
+    if incoming_energy < 0.005 {
+        for sample in audio_data.iter_mut() {
+            *sample = 0.0;
+        }
+        return;
+    }
+    
     // If reference energy is high (we're talking), suppress the incoming audio more
     // to reduce echo. Otherwise, let it through with less suppression.
-    let suppression_factor = if ref_energy > 0.01 {
+    let suppression_factor = if ref_energy > 0.02 {  // Higher threshold
         // We're actively sending audio - likely echo in the return path
         // Calculate adaptive gain based on energy ratio
         let energy_ratio = incoming_energy / (ref_energy + 0.001);
         
         // If incoming energy is similar to our reference (likely echo), suppress more
         if energy_ratio < 2.0 {
-            // Likely echo - apply strong suppression
-            0.2 // 80% suppression
+            // Likely echo - apply VERY strong suppression to prevent howling
+            0.05 // 95% suppression
+        } else if energy_ratio < 4.0 {
+            // Borderline case
+            0.3 // 70% suppression
         } else {
-            // Different signal - probably remote person talking - less suppression
+            // Different signal - probably remote person talking - minimal suppression
             0.7 // 30% suppression
         }
     } else {
         // We're not sending audio - minimal suppression
-        0.95 // 5% suppression
+        0.9 // 10% suppression
     };
     
     // Apply the suppression factor
@@ -281,11 +292,11 @@ mod cpal_impl {
         }
         #[cfg(not(windows))]
         {
-            match &state.stream {
-                None => {
-                    state.stream = Some(play(&sp)?);
-                }
-                _ => {}
+        match &state.stream {
+            None => {
+                state.stream = Some(play(&sp)?);
+            }
+            _ => {}
             }
         }
         if let Some((_, format)) = &state.stream {
@@ -307,11 +318,11 @@ mod cpal_impl {
             }
             #[cfg(not(windows))]
             {
-                match &state.stream {
-                    None => {
-                        state.stream = Some(play(&sp)?);
-                    }
-                    _ => {}
+            match &state.stream {
+                None => {
+                    state.stream = Some(play(&sp)?);
+                }
+                _ => {}
                 }
             }
             if let Some((_, format)) = &state.stream {
@@ -406,52 +417,67 @@ mod cpal_impl {
             mic_resampled
         };
 
-        // Ensure both have the same length (take minimum)
-        let min_len = std::cmp::min(loopback_resampled.len(), mic_resampled.len());
-        if min_len == 0 {
+        // Ensure both have the same length - pad shorter one with zeros instead of truncating
+        let max_len = std::cmp::max(loopback_resampled.len(), mic_resampled.len());
+        if max_len == 0 {
             return;
         }
+        
+        // Pad with zeros if needed to match lengths
+        if loopback_resampled.len() < max_len {
+            loopback_resampled.resize(max_len, 0.0);
+        }
+        if mic_resampled.len() < max_len {
+            mic_resampled.resize(max_len, 0.0);
+        }
+        
+        let mix_len = max_len;
 
         // Calculate energies for adaptive echo suppression
         let mut loopback_energy = 0.0f32;
         let mut mic_energy = 0.0f32;
-        for i in 0..min_len {
+        for i in 0..mix_len {
             let lb = loopback_resampled[i];
             let mc = mic_resampled[i];
             loopback_energy += lb * lb;
             mic_energy += mc * mc;
         }
-        loopback_energy = (loopback_energy / min_len as f32).sqrt();
-        mic_energy = (mic_energy / min_len as f32).sqrt();
+        loopback_energy = (loopback_energy / mix_len as f32).sqrt();
+        mic_energy = (mic_energy / mix_len as f32).sqrt();
         
         // Apply adaptive suppression to mic if loopback energy is high
         // This reduces echo when the client is playing audio
-        let mut mic_processed = Vec::with_capacity(min_len);
-        if loopback_energy > 0.01 {
+        let mut mic_processed = Vec::with_capacity(mix_len);
+        if loopback_energy > 0.02 {  // Higher threshold to avoid false triggers
             // Loopback is active - calculate suppression factor
             let energy_ratio = mic_energy / (loopback_energy + 0.001);
             let suppression = if energy_ratio < 1.5 {
                 // Mic energy similar to loopback - likely echo, suppress more
+                0.05 // 95% suppression (stronger to prevent howling)
+            } else if energy_ratio < 3.0 {
+                // Borderline - moderate suppression
                 0.3 // 70% suppression
             } else {
-                // Mic has different signal - less suppression
+                // Mic has different signal - minimal suppression
                 0.7 // 30% suppression
             };
             
-            for &sample in mic_resampled[..min_len].iter() {
+            for &sample in mic_resampled[..mix_len].iter() {
                 mic_processed.push(sample * suppression);
             }
         } else {
-            // Loopback not active - minimal suppression
-            mic_processed = mic_resampled[..min_len].to_vec();
+            // Loopback not active - use mic as-is with light noise reduction
+            for &sample in mic_resampled[..mix_len].iter() {
+                mic_processed.push(sample * 0.9);
+            }
         }
 
         // Mix the two sources together with adjusted gain control
         // Loopback gets 70% gain, mic gets 30% gain (as requested by user)
-        let mut mixed = Vec::with_capacity(min_len);
-        for i in 0..min_len {
-            let loopback_val = loopback_resampled.get(i).copied().unwrap_or(0.0);
-            let mic_val = mic_processed.get(i).copied().unwrap_or(0.0);
+        let mut mixed = Vec::with_capacity(mix_len);
+        for i in 0..mix_len {
+            let loopback_val = loopback_resampled[i];
+            let mic_val = mic_processed[i];
             // Mix with loopback priority (70%) and mic (30%)
             let mixed_val = (loopback_val * 0.7) + (mic_val * 0.3);
             // Clamp to [-1.0, 1.0] range
@@ -614,21 +640,40 @@ mod cpal_impl {
         let sample_rate = 48000;
         let ch = Stereo; // Always use stereo for mixed output
         
-        // Get sample rates and channels for both sources
+        // Get sample rates and channels for both sources - DYNAMICALLY from devices
         let loopback_sample_rate_0 = loopback_config.sample_rate().0;
         let loopback_device_channel = loopback_config.channels();
         let mic_sample_rate_0 = mic_config.sample_rate().0;
         let mic_device_channel = mic_config.channels();
         
+        // Log the detected sample rates and formats for debugging
+        log::info!("=== Audio Mixing Configuration ===");
+        log::info!("Loopback: {} Hz, {} channels, format: {:?}", 
+            loopback_sample_rate_0, loopback_device_channel, loopback_config.sample_format());
+        log::info!("Microphone: {} Hz, {} channels, format: {:?}", 
+            mic_sample_rate_0, mic_device_channel, mic_config.sample_format());
+        log::info!("Target (encoder): {} Hz, {} channels", sample_rate, ch as u16);
+        log::info!("==================================");
+        
         // Create encoder for mixed output (wrapped in Arc<Mutex> for sharing)
         let encoder = Arc::new(Mutex::new(Encoder::new(sample_rate, ch, LowDelay)?));
         let encode_channel = ch as u16;
         
-        // Calculate frame sizes
-        let frame_size = sample_rate as usize / 100; // 10 ms
-        let encode_len = frame_size * encode_channel as usize;
-        let loopback_rechannel_len = encode_len * loopback_device_channel as usize / encode_channel as usize;
-        let mic_rechannel_len = encode_len * mic_device_channel as usize / encode_channel as usize;
+        // Calculate frame sizes based on ACTUAL device sample rates (not target)
+        // This ensures proper alignment before resampling
+        let frame_duration_ms = 10.0; // 10 ms frames
+        
+        // Calculate frame size at each device's native rate
+        let loopback_frame_samples = (loopback_sample_rate_0 as f64 * frame_duration_ms / 1000.0).round() as usize;
+        let mic_frame_samples = (mic_sample_rate_0 as f64 * frame_duration_ms / 1000.0).round() as usize;
+        
+        // Calculate buffer sizes including channels
+        let loopback_rechannel_len = loopback_frame_samples * loopback_device_channel as usize;
+        let mic_rechannel_len = mic_frame_samples * mic_device_channel as usize;
+        
+        log::debug!("Frame sizes - Loopback: {} samples ({} with channels), Mic: {} samples ({} with channels)",
+            loopback_frame_samples, loopback_rechannel_len,
+            mic_frame_samples, mic_rechannel_len);
         
         // Clear buffers
         LOOPBACK_BUFFER.lock().unwrap().clear();
@@ -689,41 +734,41 @@ mod cpal_impl {
         
         #[cfg(not(windows))]
         {
-            use cpal::SampleFormat::*;
-            let (device, config) = get_device()?;
-            let sp = sp.clone();
-            // Sample rate must be one of 8000, 12000, 16000, 24000, or 48000.
-            let sample_rate_0 = config.sample_rate().0;
-            let sample_rate = if sample_rate_0 < 12000 {
-                8000
-            } else if sample_rate_0 < 16000 {
-                12000
-            } else if sample_rate_0 < 24000 {
-                16000
-            } else if sample_rate_0 < 48000 {
-                24000
-            } else {
-                48000
-            };
-            let ch = if config.channels() > 1 { Stereo } else { Mono };
-            let stream = match config.sample_format() {
-                I8 => build_input_stream::<i8>(device, &config, sp, sample_rate, ch)?,
-                I16 => build_input_stream::<i16>(device, &config, sp, sample_rate, ch)?,
-                I32 => build_input_stream::<i32>(device, &config, sp, sample_rate, ch)?,
-                I64 => build_input_stream::<i64>(device, &config, sp, sample_rate, ch)?,
-                U8 => build_input_stream::<u8>(device, &config, sp, sample_rate, ch)?,
-                U16 => build_input_stream::<u16>(device, &config, sp, sample_rate, ch)?,
-                U32 => build_input_stream::<u32>(device, &config, sp, sample_rate, ch)?,
-                U64 => build_input_stream::<u64>(device, &config, sp, sample_rate, ch)?,
-                F32 => build_input_stream::<f32>(device, &config, sp, sample_rate, ch)?,
-                F64 => build_input_stream::<f64>(device, &config, sp, sample_rate, ch)?,
-                f => bail!("unsupported audio format: {:?}", f),
-            };
-            stream.play()?;
-            Ok((
-                Box::new(stream),
-                Arc::new(create_format_msg(sample_rate, ch as _)),
-            ))
+        use cpal::SampleFormat::*;
+        let (device, config) = get_device()?;
+        let sp = sp.clone();
+        // Sample rate must be one of 8000, 12000, 16000, 24000, or 48000.
+        let sample_rate_0 = config.sample_rate().0;
+        let sample_rate = if sample_rate_0 < 12000 {
+            8000
+        } else if sample_rate_0 < 16000 {
+            12000
+        } else if sample_rate_0 < 24000 {
+            16000
+        } else if sample_rate_0 < 48000 {
+            24000
+        } else {
+            48000
+        };
+        let ch = if config.channels() > 1 { Stereo } else { Mono };
+        let stream = match config.sample_format() {
+            I8 => build_input_stream::<i8>(device, &config, sp, sample_rate, ch)?,
+            I16 => build_input_stream::<i16>(device, &config, sp, sample_rate, ch)?,
+            I32 => build_input_stream::<i32>(device, &config, sp, sample_rate, ch)?,
+            I64 => build_input_stream::<i64>(device, &config, sp, sample_rate, ch)?,
+            U8 => build_input_stream::<u8>(device, &config, sp, sample_rate, ch)?,
+            U16 => build_input_stream::<u16>(device, &config, sp, sample_rate, ch)?,
+            U32 => build_input_stream::<u32>(device, &config, sp, sample_rate, ch)?,
+            U64 => build_input_stream::<u64>(device, &config, sp, sample_rate, ch)?,
+            F32 => build_input_stream::<f32>(device, &config, sp, sample_rate, ch)?,
+            F64 => build_input_stream::<f64>(device, &config, sp, sample_rate, ch)?,
+            f => bail!("unsupported audio format: {:?}", f),
+        };
+        stream.play()?;
+        Ok((
+            Box::new(stream),
+            Arc::new(create_format_msg(sample_rate, ch as _)),
+        ))
         }
     }
 
@@ -784,8 +829,8 @@ mod cpal_impl {
                         processed_frame = crate::common::audio_rechannel(
                             processed_frame,
                             sample_rate,
-                            sample_rate,
-                            device_channel,
+                        sample_rate,
+                        device_channel,
                             encode_channel as u16,
                         );
                     }
@@ -875,12 +920,11 @@ mod cpal_impl {
                     drop(lock);
                 }
                 
-                // Process mixing more frequently - check both buffers independently
-                // Use smaller frame sizes to reduce latency (5ms instead of 10ms)
-                let small_frame_size = target_sample_rate as usize / 200; // 5 ms for lower latency
-                let small_encode_len = small_frame_size * encode_channel as usize;
-                let loopback_small_len = small_encode_len * loopback_device_channel as usize / encode_channel as usize;
-                let mic_small_len = small_encode_len * mic_device_channel as usize / encode_channel as usize;
+                // Process mixing - use frame sizes based on actual device sample rates
+                // Calculate how many samples we need from each device for 10ms of audio
+                let frame_duration_ms = 10.0;
+                let loopback_small_len = (loopback_sample_rate_0 as f64 * frame_duration_ms / 1000.0).round() as usize * loopback_device_channel as usize;
+                let mic_small_len = (mic_sample_rate_0 as f64 * frame_duration_ms / 1000.0).round() as usize * mic_device_channel as usize;
                 
                 let loopback_lock = LOOPBACK_BUFFER.lock().unwrap();
                 let mic_lock = MIC_BUFFER.lock().unwrap();

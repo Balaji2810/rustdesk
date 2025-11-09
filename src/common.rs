@@ -271,12 +271,15 @@ pub fn resample_channels(
         oversampling_factor: 160,
         window: WindowFunction::BlackmanHarris2,
     };
+    let chunk_size = data.len() / (channels as usize);
     let mut resampler = SincFixedIn::<f64>::new(
         sample_rate as f64 / sample_rate0 as f64,
+        2.0,
         params,
-        data.len() / (channels as usize),
+        chunk_size,
         channels as _,
-    );
+    )
+    .unwrap();
     let mut waves_in = Vec::new();
     if channels == 2 {
         waves_in.push(
@@ -295,7 +298,7 @@ pub fn resample_channels(
     } else {
         waves_in.push(data.iter().map(|x| *x as f64).collect::<Vec<_>>());
     }
-    if let Ok(x) = resampler.process(&waves_in) {
+    if let Ok(x) = resampler.process(&waves_in, None) {
         if x.is_empty() {
             Vec::new()
         } else if x.len() == 2 {
@@ -346,6 +349,74 @@ pub fn audio_resample(
             .take(n)
             .collect()
     }
+}
+
+#[cfg(feature = "use_rubato")]
+pub fn audio_resample(
+    data: &[f32],
+    sample_rate0: u32,
+    sample_rate: u32,
+    channels: u16,
+) -> Vec<f32> {
+    use rubato::{FastFixedIn, PolynomialDegree, Resampler};
+    
+    // If rates are the same, no resampling needed
+    if sample_rate0 == sample_rate {
+        return data.to_vec();
+    }
+    
+    if data.is_empty() {
+        return Vec::new();
+    }
+    
+    let channels = channels as usize;
+    let chunk_size = data.len() / channels;
+    
+    if chunk_size == 0 {
+        return Vec::new();
+    }
+    
+    // Use FastFixedIn for lower latency - good for real-time audio
+    // PolynomialDegree::Septic provides good quality with reasonable CPU usage
+    let mut resampler = match FastFixedIn::<f32>::new(
+        sample_rate as f64 / sample_rate0 as f64,
+        2.0, // max_resample_ratio_relative
+        PolynomialDegree::Septic,
+        chunk_size,
+        channels,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("Failed to create resampler: {}", e);
+            return data.to_vec();
+        }
+    };
+    
+    // Deinterleave: convert from [L,R,L,R,...] to [[L,L,...], [R,R,...]]
+    let mut separated: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
+    for (i, &sample) in data.iter().enumerate() {
+        separated[i % channels].push(sample);
+    }
+    
+    // Resample
+    let resampled = match resampler.process(&separated, None) {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("Resampling failed: {}", e);
+            return data.to_vec();
+        }
+    };
+    
+    // Reinterleave: convert back to [L,R,L,R,...]
+    let output_frames = resampled[0].len();
+    let mut output = Vec::with_capacity(output_frames * channels);
+    for frame in 0..output_frames {
+        for ch in 0..channels {
+            output.push(resampled[ch][frame]);
+        }
+    }
+    
+    output
 }
 
 #[cfg(feature = "use_samplerate")]
