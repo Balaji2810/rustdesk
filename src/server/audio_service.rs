@@ -29,6 +29,12 @@ lazy_static::lazy_static! {
     static ref CLIENT_REFERENCE_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     static ref CLIENT_REFERENCE_ENERGY: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
+    
+    // WebRTC Audio Processing Module instances
+    #[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
+    static ref SERVER_APM_PROCESSOR: Arc<Mutex<Option<webrtc_audio_processing::Processor>>> = Arc::new(Mutex::new(None));
+    #[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
+    static ref CLIENT_APM_PROCESSOR: Arc<Mutex<Option<webrtc_audio_processing::Processor>>> = Arc::new(Mutex::new(None));
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -80,6 +86,90 @@ pub fn restart() {
     RESTARTING.store(true, Ordering::SeqCst);
 }
 
+// Initialize WebRTC APM for server-side (mixing) processing
+#[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
+fn init_server_apm() -> Result<webrtc_audio_processing::Processor, Box<dyn std::error::Error>> {
+    use webrtc_audio_processing::*;
+    
+    // Create processor with default config (48kHz, stereo)
+    let config = ProcessorConfig::default();
+    let mut processor = Processor::new(config)?;
+    
+    // Configure echo cancellation
+    processor.set_echo_cancellation(Some(EchoCancellation::new(true, true)));
+    
+    // Configure noise suppression (high level for server mixing)
+    processor.set_noise_suppression(Some(NoiseSuppression::new(true)));
+    
+    // Configure automatic gain control
+    processor.set_gain_control(Some(GainControl::new(true)));
+    
+    log::info!("Server WebRTC APM configured: AEC=on, NS=on, AGC=on");
+    
+    Ok(processor)
+}
+
+// Initialize WebRTC APM for client-side (mic input) processing
+#[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
+fn init_client_apm() -> Result<webrtc_audio_processing::Processor, Box<dyn std::error::Error>> {
+    use webrtc_audio_processing::*;
+    
+    // Create processor with default config (48kHz, stereo)
+    let config = ProcessorConfig::default();
+    let mut processor = Processor::new(config)?;
+    
+    // Configure echo cancellation
+    processor.set_echo_cancellation(Some(EchoCancellation::new(true, true)));
+    
+    // Configure noise suppression
+    processor.set_noise_suppression(Some(NoiseSuppression::new(true)));
+    
+    // Configure automatic gain control
+    processor.set_gain_control(Some(GainControl::new(true)));
+    
+    log::info!("Client WebRTC APM configured: AEC=on, NS=on, AGC=on");
+    
+    Ok(processor)
+}
+
+// Get or initialize server APM processor
+#[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
+fn get_server_apm() -> Option<std::sync::MutexGuard<'static, Option<webrtc_audio_processing::Processor>>> {
+    let mut guard = SERVER_APM_PROCESSOR.lock().unwrap();
+    if guard.is_none() {
+        match init_server_apm() {
+            Ok(processor) => {
+                log::info!("WebRTC APM initialized for server-side audio processing");
+                *guard = Some(processor);
+            }
+            Err(e) => {
+                log::error!("Failed to initialize server WebRTC APM: {}", e);
+                return None;
+            }
+        }
+    }
+    Some(guard)
+}
+
+// Get or initialize client APM processor
+#[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
+fn get_client_apm() -> Option<std::sync::MutexGuard<'static, Option<webrtc_audio_processing::Processor>>> {
+    let mut guard = CLIENT_APM_PROCESSOR.lock().unwrap();
+    if guard.is_none() {
+        match init_client_apm() {
+            Ok(processor) => {
+                log::info!("WebRTC APM initialized for client-side audio processing");
+                *guard = Some(processor);
+            }
+            Err(e) => {
+                log::error!("Failed to initialize client WebRTC APM: {}", e);
+                return None;
+            }
+        }
+    }
+    Some(guard)
+}
+
 // Client-side: Store reference audio (microphone input being sent to remote)
 // This is the far-end signal that will echo back through remote speakers -> remote mic -> client speakers
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -96,10 +186,32 @@ pub fn store_client_mic_reference(audio_data: &[f32]) {
     *ref_energy = *ref_energy * 0.95 + energy * 0.05;
 }
 
-// Client-side: Apply adaptive gain-based echo suppression to incoming audio from remote
-// This uses a simpler approach than full AEC but is more reliable and cross-platform
+// Client-side: Apply echo suppression to incoming audio from remote
+// Uses WebRTC APM when available, falls back to simple adaptive gain suppression otherwise
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub fn apply_client_echo_suppression(audio_data: &mut Vec<f32>) {
+    // Try to use WebRTC APM first
+    #[cfg(feature = "use_webrtc_apm")]
+    {
+        if let Some(mut guard) = get_client_apm() {
+            if let Some(processor) = guard.as_mut() {
+                // WebRTC APM expects interleaved stereo f32 data
+                // Process the audio through WebRTC APM (handles echo cancellation, noise suppression, AGC)
+                match processor.process(audio_data) {
+                    Ok(processed) => {
+                        *audio_data = processed;
+                        log::trace!("Client audio processed with WebRTC APM");
+                        return; // Successfully processed with WebRTC APM
+                    }
+                    Err(e) => {
+                        log::warn!("WebRTC APM processing failed, falling back to simple suppression: {}", e);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback to simple adaptive gain-based echo suppression
     let ref_energy = *CLIENT_REFERENCE_ENERGY.lock().unwrap();
     
     // Calculate energy of incoming audio
@@ -109,38 +221,38 @@ pub fn apply_client_echo_suppression(audio_data: &mut Vec<f32>) {
     }
     incoming_energy = (incoming_energy / audio_data.len() as f32).sqrt();
     
-    // Noise gate - completely mute very quiet audio
-    if incoming_energy < 0.005 {
+    // Gentle noise gate - only mute extremely quiet audio
+    if incoming_energy < 0.002 {
         for sample in audio_data.iter_mut() {
-            *sample = 0.0;
+            *sample *= 0.1;
         }
         return;
     }
     
     // If reference energy is high (we're talking), suppress the incoming audio more
     // to reduce echo. Otherwise, let it through with less suppression.
-    let suppression_factor = if ref_energy > 0.02 {  // Higher threshold
+    let suppression_factor = if ref_energy > 0.015 {  // Moderate threshold
         // We're actively sending audio - likely echo in the return path
         // Calculate adaptive gain based on energy ratio
         let energy_ratio = incoming_energy / (ref_energy + 0.001);
         
         // If incoming energy is similar to our reference (likely echo), suppress more
-        if energy_ratio < 2.0 {
-            // Likely echo - apply VERY strong suppression to prevent howling
-            0.05 // 95% suppression
-        } else if energy_ratio < 4.0 {
-            // Borderline case
-            0.3 // 70% suppression
+        if energy_ratio < 0.8 {
+            // Likely echo - apply strong suppression
+            0.15 // 85% suppression
+        } else if energy_ratio < 1.5 {
+            // Possible echo - moderate suppression
+            0.5 // 50% suppression
         } else {
             // Different signal - probably remote person talking - minimal suppression
-            0.7 // 30% suppression
+            0.85 // 15% suppression
         }
     } else {
-        // We're not sending audio - minimal suppression
-        0.9 // 10% suppression
+        // We're not sending audio - pass through with minimal filtering
+        1.0 // No suppression
     };
     
-    // Apply the suppression factor
+    // Apply the suppression factor smoothly
     for sample in audio_data.iter_mut() {
         *sample *= suppression_factor;
     }
@@ -433,6 +545,46 @@ mod cpal_impl {
         
         let mix_len = max_len;
 
+        // Try to use WebRTC APM for professional-grade audio processing
+        #[cfg(feature = "use_webrtc_apm")]
+        {
+            if let Some(mut guard) = get_server_apm() {
+                if let Some(processor) = guard.as_mut() {
+                    // First mix the two sources together
+                    let mut mixed = Vec::with_capacity(mix_len);
+                    for i in 0..mix_len {
+                        let loopback_val = loopback_resampled[i];
+                        let mic_val = mic_resampled[i];
+                        // Mix with loopback priority (70%) and mic (30%)
+                        mixed.push((loopback_val * 0.7) + (mic_val * 0.3));
+                    }
+                    
+                    // Process through WebRTC APM (handles AEC, NS, AGC, HPF automatically)
+                    // The loopback serves as the reference signal for echo cancellation
+                    match processor.process_reverse(&loopback_resampled) {
+                        Ok(_) => {
+                            match processor.process(&mixed) {
+                                Ok(processed) => {
+                                    log::trace!("Server audio processed with WebRTC APM");
+                                    // Lock encoder and send
+                                    let mut encoder_guard = encoder.lock().unwrap();
+                                    send_f32(&processed, &mut *encoder_guard, sp);
+                                    return; // Successfully processed with WebRTC APM
+                                }
+                                Err(e) => {
+                                    log::warn!("WebRTC APM process failed: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("WebRTC APM process_reverse failed: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback to manual processing if WebRTC APM is not available or failed
         // Calculate energies for adaptive echo suppression
         let mut loopback_energy = 0.0f32;
         let mut mic_energy = 0.0f32;
@@ -445,31 +597,28 @@ mod cpal_impl {
         loopback_energy = (loopback_energy / mix_len as f32).sqrt();
         mic_energy = (mic_energy / mix_len as f32).sqrt();
         
-        // Apply adaptive suppression to mic if loopback energy is high
-        // This reduces echo when the client is playing audio
+        // Apply gentle adaptive suppression to mic - less aggressive to preserve quality
         let mut mic_processed = Vec::with_capacity(mix_len);
-        if loopback_energy > 0.02 {  // Higher threshold to avoid false triggers
+        if loopback_energy > 0.01 {  // Lower threshold
             // Loopback is active - calculate suppression factor
             let energy_ratio = mic_energy / (loopback_energy + 0.001);
-            let suppression = if energy_ratio < 1.5 {
-                // Mic energy similar to loopback - likely echo, suppress more
-                0.05 // 95% suppression (stronger to prevent howling)
-            } else if energy_ratio < 3.0 {
-                // Borderline - moderate suppression
-                0.3 // 70% suppression
+            let suppression = if energy_ratio < 0.5 {
+                // Very likely echo - strong suppression
+                0.1 // 90% suppression
+            } else if energy_ratio < 1.2 {
+                // Likely echo - moderate suppression
+                0.4 // 60% suppression
             } else {
-                // Mic has different signal - minimal suppression
-                0.7 // 30% suppression
+                // Probably different signal - minimal suppression
+                0.8 // 20% suppression
             };
             
             for &sample in mic_resampled[..mix_len].iter() {
                 mic_processed.push(sample * suppression);
             }
         } else {
-            // Loopback not active - use mic as-is with light noise reduction
-            for &sample in mic_resampled[..mix_len].iter() {
-                mic_processed.push(sample * 0.9);
-            }
+            // Loopback not active - pass through mic without reduction
+            mic_processed = mic_resampled[..mix_len].to_vec();
         }
 
         // Mix the two sources together with adjusted gain control
@@ -480,8 +629,13 @@ mod cpal_impl {
             let mic_val = mic_processed[i];
             // Mix with loopback priority (70%) and mic (30%)
             let mixed_val = (loopback_val * 0.7) + (mic_val * 0.3);
-            // Clamp to [-1.0, 1.0] range
-            mixed.push(mixed_val.max(-1.0).min(1.0));
+            // Soft clipping using tanh for smoother limiting
+            let clamped = if mixed_val.abs() > 0.9 {
+                mixed_val.signum() * (0.9 + 0.1 * (mixed_val.abs() - 0.9).tanh())
+            } else {
+                mixed_val
+            };
+            mixed.push(clamped.max(-1.0).min(1.0));
         }
 
         // Lock encoder and send
@@ -835,12 +989,37 @@ mod cpal_impl {
                         );
                     }
                     
+                    // Process client mic input with WebRTC APM if available
+                    let mut final_frame = processed_frame.clone();
+                    
+                    #[cfg(feature = "use_webrtc_apm")]
+                    {
+                        if let Some(mut guard) = super::get_client_apm() {
+                            if let Some(processor) = guard.as_mut() {
+                                // Process microphone input through WebRTC APM
+                                // This handles noise suppression, AGC, and high-pass filter
+                                // Echo cancellation happens on the receiving end
+                                match processor.process(&final_frame) {
+                                    Ok(processed) => {
+                                        final_frame = processed;
+                                        log::trace!("Client mic input processed with WebRTC APM");
+                                    }
+                                    Err(e) => {
+                                        log::warn!("WebRTC APM mic processing failed: {}", e);
+                                        // Use unprocessed frame as fallback
+                                        final_frame = processed_frame.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
                     // Store microphone input as reference for client-side AEC
                     // This will be used to remove echo when it comes back from remote
-                    super::store_client_mic_reference(&processed_frame);
+                    super::store_client_mic_reference(&final_frame);
                     
-                    // Send the audio (no AEC applied here on client mic input)
-                    send_f32(&processed_frame, &mut encoder, &sp);
+                    // Send the processed audio
+                    send_f32(&final_frame, &mut encoder, &sp);
                 }
             },
             err_fn,
@@ -920,9 +1099,9 @@ mod cpal_impl {
                     drop(lock);
                 }
                 
-                // Process mixing - use frame sizes based on actual device sample rates
-                // Calculate how many samples we need from each device for 10ms of audio
-                let frame_duration_ms = 10.0;
+                // Process mixing - use larger frame sizes for stability (20ms instead of 10ms)
+                // Larger frames reduce glitches and improve resampling quality
+                let frame_duration_ms = 20.0;
                 let loopback_small_len = (loopback_sample_rate_0 as f64 * frame_duration_ms / 1000.0).round() as usize * loopback_device_channel as usize;
                 let mic_small_len = (mic_sample_rate_0 as f64 * frame_duration_ms / 1000.0).round() as usize * mic_device_channel as usize;
                 
@@ -930,19 +1109,25 @@ mod cpal_impl {
                 let mic_lock = MIC_BUFFER.lock().unwrap();
                 
                 // Process when we have at least one complete frame from each buffer
-                // This reduces delay compared to waiting for both to have full frames
                 let loopback_available = loopback_lock.len();
                 let mic_available = mic_lock.len();
                 
-                // Use the minimum available frame count to keep them synchronized
+                // Check if both buffers have enough data
                 let loopback_frames = loopback_available / loopback_small_len;
                 let mic_frames = mic_available / mic_small_len;
-                let frames_to_process = std::cmp::min(loopback_frames, mic_frames);
+                
+                // Only process if BOTH have at least 1 complete frame
+                // This ensures proper synchronization
+                let frames_to_process = if loopback_frames > 0 && mic_frames > 0 {
+                    std::cmp::min(loopback_frames, mic_frames).min(3) // Process max 3 frames at once
+                } else {
+                    0
+                };
                 
                 drop(loopback_lock);
                 drop(mic_lock);
                 
-                // Process available frames to reduce delay
+                // Process available frames
                 if frames_to_process > 0 {
                     let mut loopback_lock = LOOPBACK_BUFFER.lock().unwrap();
                     let mut mic_lock = MIC_BUFFER.lock().unwrap();
