@@ -30,11 +30,6 @@ lazy_static::lazy_static! {
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     static ref CLIENT_REFERENCE_ENERGY: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
     
-    // WebRTC Audio Processing Module instances
-    #[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
-    static ref SERVER_APM_PROCESSOR: Arc<Mutex<Option<webrtc_audio_processing::Processor>>> = Arc::new(Mutex::new(None));
-    #[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
-    static ref CLIENT_APM_PROCESSOR: Arc<Mutex<Option<webrtc_audio_processing::Processor>>> = Arc::new(Mutex::new(None));
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -86,90 +81,6 @@ pub fn restart() {
     RESTARTING.store(true, Ordering::SeqCst);
 }
 
-// Initialize WebRTC APM for server-side (mixing) processing
-#[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
-fn init_server_apm() -> Result<webrtc_audio_processing::Processor, Box<dyn std::error::Error>> {
-    use webrtc_audio_processing::*;
-    
-    // Create processor with default config (48kHz, stereo)
-    let config = ProcessorConfig::default();
-    let mut processor = Processor::new(config)?;
-    
-    // Configure echo cancellation
-    processor.set_echo_cancellation(Some(EchoCancellation::new(true, true)));
-    
-    // Configure noise suppression (high level for server mixing)
-    processor.set_noise_suppression(Some(NoiseSuppression::new(true)));
-    
-    // Configure automatic gain control
-    processor.set_gain_control(Some(GainControl::new(true)));
-    
-    log::info!("Server WebRTC APM configured: AEC=on, NS=on, AGC=on");
-    
-    Ok(processor)
-}
-
-// Initialize WebRTC APM for client-side (mic input) processing
-#[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
-fn init_client_apm() -> Result<webrtc_audio_processing::Processor, Box<dyn std::error::Error>> {
-    use webrtc_audio_processing::*;
-    
-    // Create processor with default config (48kHz, stereo)
-    let config = ProcessorConfig::default();
-    let mut processor = Processor::new(config)?;
-    
-    // Configure echo cancellation
-    processor.set_echo_cancellation(Some(EchoCancellation::new(true, true)));
-    
-    // Configure noise suppression
-    processor.set_noise_suppression(Some(NoiseSuppression::new(true)));
-    
-    // Configure automatic gain control
-    processor.set_gain_control(Some(GainControl::new(true)));
-    
-    log::info!("Client WebRTC APM configured: AEC=on, NS=on, AGC=on");
-    
-    Ok(processor)
-}
-
-// Get or initialize server APM processor
-#[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
-fn get_server_apm() -> Option<std::sync::MutexGuard<'static, Option<webrtc_audio_processing::Processor>>> {
-    let mut guard = SERVER_APM_PROCESSOR.lock().unwrap();
-    if guard.is_none() {
-        match init_server_apm() {
-            Ok(processor) => {
-                log::info!("WebRTC APM initialized for server-side audio processing");
-                *guard = Some(processor);
-            }
-            Err(e) => {
-                log::error!("Failed to initialize server WebRTC APM: {}", e);
-                return None;
-            }
-        }
-    }
-    Some(guard)
-}
-
-// Get or initialize client APM processor
-#[cfg(all(feature = "use_webrtc_apm", not(any(target_os = "linux", target_os = "android"))))]
-fn get_client_apm() -> Option<std::sync::MutexGuard<'static, Option<webrtc_audio_processing::Processor>>> {
-    let mut guard = CLIENT_APM_PROCESSOR.lock().unwrap();
-    if guard.is_none() {
-        match init_client_apm() {
-            Ok(processor) => {
-                log::info!("WebRTC APM initialized for client-side audio processing");
-                *guard = Some(processor);
-            }
-            Err(e) => {
-                log::error!("Failed to initialize client WebRTC APM: {}", e);
-                return None;
-            }
-        }
-    }
-    Some(guard)
-}
-
 // Client-side: Store reference audio (microphone input being sent to remote)
 // This is the far-end signal that will echo back through remote speakers -> remote mic -> client speakers
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -186,32 +97,10 @@ pub fn store_client_mic_reference(audio_data: &[f32]) {
     *ref_energy = *ref_energy * 0.95 + energy * 0.05;
 }
 
-// Client-side: Apply echo suppression to incoming audio from remote
-// Uses WebRTC APM when available, falls back to simple adaptive gain suppression otherwise
+// Client-side: Apply adaptive gain-based echo suppression to incoming audio from remote
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub fn apply_client_echo_suppression(audio_data: &mut Vec<f32>) {
-    // Try to use WebRTC APM first
-    #[cfg(feature = "use_webrtc_apm")]
-    {
-        if let Some(mut guard) = get_client_apm() {
-            if let Some(processor) = guard.as_mut() {
-                // WebRTC APM expects interleaved stereo f32 data
-                // Process the audio through WebRTC APM (handles echo cancellation, noise suppression, AGC)
-                match processor.process(audio_data) {
-                    Ok(processed) => {
-                        *audio_data = processed;
-                        log::trace!("Client audio processed with WebRTC APM");
-                        return; // Successfully processed with WebRTC APM
-                    }
-                    Err(e) => {
-                        log::warn!("WebRTC APM processing failed, falling back to simple suppression: {}", e);
-                    }
-                }
-            }
-        }
-    }
-    
-    // Fallback to simple adaptive gain-based echo suppression
+    // Simple adaptive gain-based echo suppression
     let ref_energy = *CLIENT_REFERENCE_ENERGY.lock().unwrap();
     
     // Calculate energy of incoming audio
@@ -545,46 +434,7 @@ mod cpal_impl {
         
         let mix_len = max_len;
 
-        // Try to use WebRTC APM for professional-grade audio processing
-        #[cfg(feature = "use_webrtc_apm")]
-        {
-            if let Some(mut guard) = get_server_apm() {
-                if let Some(processor) = guard.as_mut() {
-                    // First mix the two sources together
-                    let mut mixed = Vec::with_capacity(mix_len);
-                    for i in 0..mix_len {
-                        let loopback_val = loopback_resampled[i];
-                        let mic_val = mic_resampled[i];
-                        // Mix with loopback priority (70%) and mic (30%)
-                        mixed.push((loopback_val * 0.7) + (mic_val * 0.3));
-                    }
-                    
-                    // Process through WebRTC APM (handles AEC, NS, AGC, HPF automatically)
-                    // The loopback serves as the reference signal for echo cancellation
-                    match processor.process_reverse(&loopback_resampled) {
-                        Ok(_) => {
-                            match processor.process(&mixed) {
-                                Ok(processed) => {
-                                    log::trace!("Server audio processed with WebRTC APM");
-                                    // Lock encoder and send
-                                    let mut encoder_guard = encoder.lock().unwrap();
-                                    send_f32(&processed, &mut *encoder_guard, sp);
-                                    return; // Successfully processed with WebRTC APM
-                                }
-                                Err(e) => {
-                                    log::warn!("WebRTC APM process failed: {}", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("WebRTC APM process_reverse failed: {}", e);
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Fallback to manual processing if WebRTC APM is not available or failed
+        // Manual processing with adaptive echo suppression
         // Calculate energies for adaptive echo suppression
         let mut loopback_energy = 0.0f32;
         let mut mic_energy = 0.0f32;
@@ -989,37 +839,12 @@ mod cpal_impl {
                         );
                     }
                     
-                    // Process client mic input with WebRTC APM if available
-                    let mut final_frame = processed_frame.clone();
-                    
-                    #[cfg(feature = "use_webrtc_apm")]
-                    {
-                        if let Some(mut guard) = super::get_client_apm() {
-                            if let Some(processor) = guard.as_mut() {
-                                // Process microphone input through WebRTC APM
-                                // This handles noise suppression, AGC, and high-pass filter
-                                // Echo cancellation happens on the receiving end
-                                match processor.process(&final_frame) {
-                                    Ok(processed) => {
-                                        final_frame = processed;
-                                        log::trace!("Client mic input processed with WebRTC APM");
-                                    }
-                                    Err(e) => {
-                                        log::warn!("WebRTC APM mic processing failed: {}", e);
-                                        // Use unprocessed frame as fallback
-                                        final_frame = processed_frame.clone();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
                     // Store microphone input as reference for client-side AEC
                     // This will be used to remove echo when it comes back from remote
-                    super::store_client_mic_reference(&final_frame);
+                    super::store_client_mic_reference(&processed_frame);
                     
-                    // Send the processed audio
-                    send_f32(&final_frame, &mut encoder, &sp);
+                    // Send the audio
+                    send_f32(&processed_frame, &mut encoder, &sp);
                 }
             },
             err_fn,
