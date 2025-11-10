@@ -262,12 +262,12 @@ pub fn resample_channels(
     channels: u16,
 ) -> Vec<f32> {
     use rubato::{
-        InterpolationParameters, InterpolationType, Resampler, SincFixedIn, WindowFunction,
+        SincInterpolationParameters, SincInterpolationType, Resampler, SincFixedIn, WindowFunction,
     };
-    let params = InterpolationParameters {
+    let params = SincInterpolationParameters {
         sinc_len: 256,
         f_cutoff: 0.95,
-        interpolation: InterpolationType::Nearest,
+        interpolation: SincInterpolationType::Nearest,
         oversampling_factor: 160,
         window: WindowFunction::BlackmanHarris2,
     };
