@@ -242,7 +242,7 @@ mod cpal_impl {
     use super::*;
     use cpal::{
         traits::{DeviceTrait, HostTrait, StreamTrait},
-        BufferSize, Device, Host, InputCallbackInfo, StreamConfig, SupportedStreamConfig,
+        BufferSize, Device, Host, InputCallbackInfo, Sample, StreamConfig, SupportedStreamConfig,
     };
 
     lazy_static::lazy_static! {
