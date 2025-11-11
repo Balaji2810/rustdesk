@@ -618,7 +618,8 @@ mod cpal_impl {
                 I16 => speaker_device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _| {
-                        let buffer: Vec<f32> = data.iter().map(|s| dasp::sample::ToSample::to_sample(*s)).collect();
+                        use dasp::sample::ToSample;
+                        let buffer: Vec<f32> = data.iter().map(|&s| s.to_sample()).collect();
                         let mut lock = SPEAKER_BUFFER.lock().unwrap();
                         lock.extend(buffer);
                     },
@@ -655,7 +656,8 @@ mod cpal_impl {
                 I16 => mic_device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _| {
-                        let buffer: Vec<f32> = data.iter().map(|s| dasp::sample::ToSample::to_sample(*s)).collect();
+                        use dasp::sample::ToSample;
+                        let buffer: Vec<f32> = data.iter().map(|&s| s.to_sample()).collect();
                         let mut lock = MIC_BUFFER.lock().unwrap();
                         lock.extend(buffer);
                     },
