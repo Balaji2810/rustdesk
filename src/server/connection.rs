@@ -3570,10 +3570,17 @@ impl Connection {
         if let Some(ts) = self.voice_call_request_timestamp.take() {
             let msg = new_voice_call_response(ts.get(), accepted);
             if accepted {
-                crate::audio_service::set_voice_call_input_device(
-                    crate::get_default_sound_input(),
-                    false,
-                );
+                #[cfg(windows)]
+                {
+                    crate::audio_service::set_voice_call_mixing(true);
+                }
+                #[cfg(not(windows))]
+                {
+                    crate::audio_service::set_voice_call_input_device(
+                        crate::get_default_sound_input(),
+                        false,
+                    );
+                }
                 self.send_to_cm(Data::StartVoiceCall);
             } else {
                 self.send_to_cm(Data::CloseVoiceCall("".to_owned()));
@@ -3595,7 +3602,14 @@ impl Connection {
     }
 
     pub async fn close_voice_call(&mut self) {
-        crate::audio_service::set_voice_call_input_device(None, true);
+        #[cfg(windows)]
+        {
+            crate::audio_service::set_voice_call_mixing(false);
+        }
+        #[cfg(not(windows))]
+        {
+            crate::audio_service::set_voice_call_input_device(None, true);
+        }
         // Notify the connection manager that the voice call has been closed.
         self.send_to_cm(Data::CloseVoiceCall("".to_owned()));
         self.voice_calling = false;

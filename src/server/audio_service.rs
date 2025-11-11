@@ -58,6 +58,22 @@ pub fn set_voice_call_input_device(device: Option<String>, set_if_present: bool)
     restart();
 }
 
+#[cfg(windows)]
+#[inline]
+pub fn set_voice_call_mixing(enabled: bool) {
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let mut is_active = cpal_impl::IS_VOICE_CALL_ACTIVE.lock().unwrap();
+        if *is_active == enabled {
+            return;
+        }
+        *is_active = enabled;
+        log::info!("Voice call mixing: {}", enabled);
+        drop(is_active);
+        restart();
+    }
+}
+
 #[inline]
 fn get_audio_input() -> String {
     VOICE_CALL_INPUT_DEVICE
@@ -183,20 +199,59 @@ mod cpal_impl {
         static ref HOST_SCREEN_CAPTURE_KIT: Result<Host, cpal::HostUnavailable> = cpal::host_from_id(cpal::HostId::ScreenCaptureKit);
     }
 
+    #[cfg(windows)]
+    lazy_static::lazy_static! {
+        static ref IS_VOICE_CALL_ACTIVE: Arc<Mutex<bool>> = Default::default();
+        static ref SPEAKER_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+        static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+    }
+
+    #[cfg(windows)]
+    struct VoiceCallStreams {
+        speaker_stream: Box<dyn StreamTrait>,
+        mic_stream: Box<dyn StreamTrait>,
+        format: Arc<Message>,
+    }
+
     #[derive(Default)]
     pub struct State {
         stream: Option<(Box<dyn StreamTrait>, Arc<Message>)>,
+        #[cfg(windows)]
+        voice_call_streams: Option<VoiceCallStreams>,
     }
 
     impl super::service::Reset for State {
         fn reset(&mut self) {
             self.stream.take();
+            #[cfg(windows)]
+            {
+                self.voice_call_streams.take();
+            }
         }
     }
 
     fn run_restart(sp: EmptyExtraFieldService, state: &mut State) -> ResultType<()> {
         state.reset();
         sp.snapshot(|_sps: ServiceSwap<_>| Ok(()))?;
+        
+        #[cfg(windows)]
+        {
+            // Check if voice call mixing is active
+            if *IS_VOICE_CALL_ACTIVE.lock().unwrap() {
+                match &state.voice_call_streams {
+                    None => {
+                        state.voice_call_streams = Some(play_voice_call_mixed(&sp)?);
+                    }
+                    _ => {}
+                }
+                if let Some(voice_streams) = &state.voice_call_streams {
+                    sp.send_shared(voice_streams.format.clone());
+                }
+                RESTARTING.store(false, Ordering::SeqCst);
+                return Ok(());
+            }
+        }
+        
         match &state.stream {
             None => {
                 state.stream = Some(play(&sp)?);
@@ -212,6 +267,23 @@ mod cpal_impl {
 
     fn run_serv_snapshot(sp: EmptyExtraFieldService, state: &mut State) -> ResultType<()> {
         sp.snapshot(|sps| {
+            #[cfg(windows)]
+            {
+                // Check if voice call mixing is active
+                if *IS_VOICE_CALL_ACTIVE.lock().unwrap() {
+                    match &state.voice_call_streams {
+                        None => {
+                            state.voice_call_streams = Some(play_voice_call_mixed(&sp)?);
+                        }
+                        _ => {}
+                    }
+                    if let Some(voice_streams) = &state.voice_call_streams {
+                        sps.send_shared(voice_streams.format.clone());
+                    }
+                    return Ok(());
+                }
+            }
+            
             match &state.stream {
                 None => {
                     state.stream = Some(play(&sp)?);
@@ -257,6 +329,125 @@ mod cpal_impl {
             )
         }
         send_f32(&data, encoder, sp);
+    }
+
+    #[cfg(all(windows, feature = "use_rubato"))]
+    fn resample_with_rubato(
+        data: &[f32],
+        from_rate: u32,
+        to_rate: u32,
+        channels: u16,
+    ) -> ResultType<Vec<f32>> {
+        use rubato::{
+            FastFixedIn, Resampler,
+        };
+        
+        if from_rate == to_rate {
+            return Ok(data.to_vec());
+        }
+
+        let chunk_size = from_rate as usize / 100; // 10ms chunks
+        let mut resampler = FastFixedIn::<f32>::new(
+            to_rate as f64 / from_rate as f64,
+            2.0, // max relative ratio deviation
+            rubato::PolynomialDegree::Septic,
+            chunk_size,
+            channels as usize,
+        )?;
+
+        // Split interleaved data into per-channel vectors
+        let mut channel_data: Vec<Vec<f32>> = vec![Vec::new(); channels as usize];
+        for (i, sample) in data.iter().enumerate() {
+            channel_data[i % channels as usize].push(*sample);
+        }
+
+        // Resample each channel
+        let resampled = resampler.process(&channel_data, None)?;
+
+        // Interleave back
+        let mut output = Vec::new();
+        let output_len = resampled[0].len();
+        for i in 0..output_len {
+            for ch in 0..channels as usize {
+                output.push(resampled[ch][i]);
+            }
+        }
+
+        Ok(output)
+    }
+
+    #[cfg(all(windows, not(feature = "use_rubato")))]
+    fn resample_with_rubato(
+        data: &[f32],
+        from_rate: u32,
+        to_rate: u32,
+        channels: u16,
+    ) -> ResultType<Vec<f32>> {
+        // Fallback to existing resampling
+        Ok(crate::common::audio_resample(data, from_rate, to_rate, channels))
+    }
+
+    #[cfg(windows)]
+    fn mix_and_send(
+        speaker_data: Vec<f32>,
+        mic_data: Vec<f32>,
+        speaker_rate: u32,
+        mic_rate: u32,
+        speaker_channels: u16,
+        mic_channels: u16,
+        target_rate: u32,
+        target_channels: u16,
+        encoder: &mut Encoder,
+        sp: &GenericService,
+    ) -> ResultType<()> {
+        // Resample both to target rate
+        let mut speaker_resampled = if speaker_rate != target_rate {
+            resample_with_rubato(&speaker_data, speaker_rate, target_rate, speaker_channels)?
+        } else {
+            speaker_data
+        };
+
+        let mut mic_resampled = if mic_rate != target_rate {
+            resample_with_rubato(&mic_data, mic_rate, target_rate, mic_channels)?
+        } else {
+            mic_data
+        };
+
+        // Rechannel both to target channels
+        if speaker_channels != target_channels {
+            speaker_resampled = crate::common::audio_rechannel(
+                speaker_resampled,
+                target_rate,
+                target_rate,
+                speaker_channels,
+                target_channels,
+            );
+        }
+
+        if mic_channels != target_channels {
+            mic_resampled = crate::common::audio_rechannel(
+                mic_resampled,
+                target_rate,
+                target_rate,
+                mic_channels,
+                target_channels,
+            );
+        }
+
+        // Ensure both have the same length (use minimum)
+        let min_len = speaker_resampled.len().min(mic_resampled.len());
+        speaker_resampled.truncate(min_len);
+        mic_resampled.truncate(min_len);
+
+        // Mix: 70% speaker + 30% mic
+        let mixed: Vec<f32> = speaker_resampled
+            .iter()
+            .zip(mic_resampled.iter())
+            .map(|(s, m)| s * 0.7 + m * 0.3)
+            .collect();
+
+        send_f32(&mixed, encoder, sp);
+        Ok(())
     }
 
     #[cfg(feature = "screencapturekit")]
@@ -346,8 +537,270 @@ mod cpal_impl {
         Ok((device, format))
     }
 
+    #[cfg(windows)]
+    fn play_voice_call_mixed(sp: &GenericService) -> ResultType<VoiceCallStreams> {
+        use cpal::SampleFormat::*;
+        
+        // Get speaker (loopback) device
+        let speaker_device = HOST
+            .default_output_device()
+            .with_context(|| "Failed to get default output device for loopback")?;
+        log::info!(
+            "Voice call speaker device: {}",
+            speaker_device.name().unwrap_or("".to_owned())
+        );
+        let speaker_config = speaker_device
+            .default_output_config()
+            .map_err(|e| anyhow!(e))
+            .with_context(|| "Failed to get default output format")?;
+        log::info!("Voice call speaker format: {:?}", speaker_config);
+
+        // Get microphone device
+        let mic_device = HOST
+            .default_input_device()
+            .with_context(|| "Failed to get default input device")?;
+        log::info!(
+            "Voice call mic device: {}",
+            mic_device.name().unwrap_or("".to_owned())
+        );
+        let mic_config = mic_device
+            .default_input_config()
+            .map_err(|e| anyhow!(e))
+            .with_context(|| "Failed to get default input format")?;
+        log::info!("Voice call mic format: {:?}", mic_config);
+
+        let sp_clone = sp.clone();
+        
+        // Determine target sample rate (use 48000 as standard)
+        let target_sample_rate = 48000u32;
+        let target_channels = Stereo;
+        
+        let speaker_rate = speaker_config.sample_rate().0;
+        let speaker_channels = speaker_config.channels();
+        let mic_rate = mic_config.sample_rate().0;
+        let mic_channels = mic_config.channels();
+
+        unsafe {
+            AUDIO_ZERO_COUNT = 0;
+        }
+
+        // Clear buffers
+        SPEAKER_BUFFER.lock().unwrap().clear();
+        MIC_BUFFER.lock().unwrap().clear();
+        
+        // Calculate frame sizes for synchronization
+        let speaker_frame_size = speaker_rate as usize / 100; // 10ms
+        let mic_frame_size = mic_rate as usize / 100; // 10ms
+        let speaker_frame_samples = speaker_frame_size * speaker_channels as usize;
+        let mic_frame_samples = mic_frame_size * mic_channels as usize;
+
+        // Build speaker stream
+        let speaker_stream = {
+            let err_fn = move |err| {
+                log::trace!("Speaker stream error: {}", err);
+            };
+            let stream_config = StreamConfig {
+                channels: speaker_channels,
+                sample_rate: speaker_config.sample_rate(),
+                buffer_size: BufferSize::Default,
+            };
+            
+            let stream = match speaker_config.sample_format() {
+                F32 => speaker_device.build_input_stream(
+                    &stream_config,
+                    move |data: &[f32], _| {
+                        let mut lock = SPEAKER_BUFFER.lock().unwrap();
+                        lock.extend(data.iter().copied());
+                    },
+                    err_fn,
+                    None,
+                )?,
+                I16 => speaker_device.build_input_stream(
+                    &stream_config,
+                    move |data: &[i16], _| {
+                        let buffer: Vec<f32> = data.iter().map(|s| dasp::sample::ToSample::to_sample(*s)).collect();
+                        let mut lock = SPEAKER_BUFFER.lock().unwrap();
+                        lock.extend(buffer);
+                    },
+                    err_fn,
+                    None,
+                )?,
+                f => bail!("Unsupported speaker audio format: {:?}", f),
+            };
+            stream.play()?;
+            stream
+        };
+
+        // Build microphone stream
+        let mic_stream = {
+            let err_fn = move |err| {
+                log::trace!("Mic stream error: {}", err);
+            };
+            let stream_config = StreamConfig {
+                channels: mic_channels,
+                sample_rate: mic_config.sample_rate(),
+                buffer_size: BufferSize::Default,
+            };
+            
+            let stream = match mic_config.sample_format() {
+                F32 => mic_device.build_input_stream(
+                    &stream_config,
+                    move |data: &[f32], _| {
+                        let mut lock = MIC_BUFFER.lock().unwrap();
+                        lock.extend(data.iter().copied());
+                    },
+                    err_fn,
+                    None,
+                )?,
+                I16 => mic_device.build_input_stream(
+                    &stream_config,
+                    move |data: &[i16], _| {
+                        let buffer: Vec<f32> = data.iter().map(|s| dasp::sample::ToSample::to_sample(*s)).collect();
+                        let mut lock = MIC_BUFFER.lock().unwrap();
+                        lock.extend(buffer);
+                    },
+                    err_fn,
+                    None,
+                )?,
+                f => bail!("Unsupported mic audio format: {:?}", f),
+            };
+            stream.play()?;
+            stream
+        };
+
+        // Spawn a thread to mix and send audio
+        let is_active = IS_VOICE_CALL_ACTIVE.clone();
+        std::thread::spawn(move || {
+            let mut encoder = match Encoder::new(target_sample_rate, target_channels, LowDelay) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    log::error!("Failed to create encoder in mixing thread: {}", e);
+                    return;
+                }
+            };
+            
+            loop {
+                // Check if we have enough data in both buffers
+                let (speaker_data, mic_data) = {
+                    let mut speaker_lock = SPEAKER_BUFFER.lock().unwrap();
+                    let mut mic_lock = MIC_BUFFER.lock().unwrap();
+
+                    if speaker_lock.len() >= speaker_frame_samples && mic_lock.len() >= mic_frame_samples {
+                        let spk: Vec<f32> = speaker_lock.drain(0..speaker_frame_samples).collect();
+                        let mic: Vec<f32> = mic_lock.drain(0..mic_frame_samples).collect();
+                        (Some(spk), Some(mic))
+                    } else {
+                        // Implement drift prevention: if one buffer is significantly ahead, drop samples
+                        const MAX_BUFFER_DIFF: usize = 48000; // 1 second worth of samples at 48kHz stereo
+                        if speaker_lock.len() > mic_lock.len() + MAX_BUFFER_DIFF {
+                            log::warn!("Speaker buffer too far ahead, dropping samples");
+                            let to_drop = speaker_lock.len() - mic_lock.len();
+                            speaker_lock.drain(0..to_drop);
+                        } else if mic_lock.len() > speaker_lock.len() + MAX_BUFFER_DIFF {
+                            log::warn!("Mic buffer too far ahead, dropping samples");
+                            let to_drop = mic_lock.len() - speaker_lock.len();
+                            mic_lock.drain(0..to_drop);
+                        }
+                        (None, None)
+                    }
+                };
+
+                if let (Some(spk), Some(mic)) = (speaker_data, mic_data) {
+                    if let Err(e) = mix_and_send(
+                        spk,
+                        mic,
+                        speaker_rate,
+                        mic_rate,
+                        speaker_channels,
+                        mic_channels,
+                        target_sample_rate,
+                        target_channels as u16,
+                        &mut encoder,
+                        &sp_clone,
+                    ) {
+                        log::error!("Failed to mix and send audio: {}", e);
+                    }
+                } else {
+                    // Wait a bit before checking again
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+
+                // Check if voice call is still active
+                if !*is_active.lock().unwrap() {
+                    log::info!("Voice call mixing thread exiting");
+                    break;
+                }
+            }
+        });
+
+        Ok(VoiceCallStreams {
+            speaker_stream: Box::new(speaker_stream),
+            mic_stream: Box::new(mic_stream),
+            format: Arc::new(create_format_msg(target_sample_rate, target_channels as _)),
+        })
+    }
+
     fn play(sp: &GenericService) -> ResultType<(Box<dyn StreamTrait>, Arc<Message>)> {
         use cpal::SampleFormat::*;
+        
+        // Check if this is a Windows voice call - if so, use dual stream mixing
+        #[cfg(windows)]
+        {
+            if *IS_VOICE_CALL_ACTIVE.lock().unwrap() {
+                log::info!("Starting voice call with mixed audio (speaker + mic)");
+                // For voice calls on Windows, we don't use the regular stream
+                // The dual streams are managed separately in state.voice_call_streams
+                // Return a dummy stream here as play() expects to return something
+                // The actual implementation will be handled in run_restart
+                let (device, config) = get_device()?;
+                let sp = sp.clone();
+                let sample_rate = 48000;
+                let ch = Stereo;
+                
+                // Build a minimal dummy stream
+                let err_fn = move |err| {
+                    log::trace!("Dummy stream error: {}", err);
+                };
+                let stream_config = StreamConfig {
+                    channels: config.channels(),
+                    sample_rate: config.sample_rate(),
+                    buffer_size: BufferSize::Default,
+                };
+                let stream = match config.sample_format() {
+                    F32 => device.build_input_stream(
+                        &stream_config,
+                        move |_data: &[f32], _| {
+                            // No-op, actual mixing happens in the dedicated thread
+                        },
+                        err_fn,
+                        None,
+                    )?,
+                    I16 => device.build_input_stream(
+                        &stream_config,
+                        move |_data: &[i16], _| {
+                            // No-op
+                        },
+                        err_fn,
+                        None,
+                    )?,
+                    _ => {
+                        // Fallback to F32
+                        device.build_input_stream(
+                            &stream_config,
+                            move |_data: &[f32], _| {},
+                            err_fn,
+                            None,
+                        )?
+                    }
+                };
+                stream.play()?;
+                return Ok((
+                    Box::new(stream),
+                    Arc::new(create_format_msg(sample_rate, ch as _)),
+                ));
+            }
+        }
+        
         let (device, config) = get_device()?;
         let sp = sp.clone();
         // Sample rate must be one of 8000, 12000, 16000, 24000, or 48000.
