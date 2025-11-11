@@ -201,7 +201,7 @@ mod cpal_impl {
 
     #[cfg(windows)]
     lazy_static::lazy_static! {
-        static ref IS_VOICE_CALL_ACTIVE: Arc<Mutex<bool>> = Default::default();
+        pub(super) static ref IS_VOICE_CALL_ACTIVE: Arc<Mutex<bool>> = Default::default();
         static ref SPEAKER_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
     }
@@ -618,8 +618,10 @@ mod cpal_impl {
                 I16 => speaker_device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _| {
-                        use dasp::sample::ToSample;
-                        let buffer: Vec<f32> = data.iter().map(|&s| s.to_sample()).collect();
+                        let buffer: Vec<f32> = data.iter().map(|&s| {
+                            // Convert i16 to f32: normalize from i16::MIN..i16::MAX to -1.0..1.0
+                            s as f32 / 32768.0
+                        }).collect();
                         let mut lock = SPEAKER_BUFFER.lock().unwrap();
                         lock.extend(buffer);
                     },
@@ -656,8 +658,10 @@ mod cpal_impl {
                 I16 => mic_device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _| {
-                        use dasp::sample::ToSample;
-                        let buffer: Vec<f32> = data.iter().map(|&s| s.to_sample()).collect();
+                        let buffer: Vec<f32> = data.iter().map(|&s| {
+                            // Convert i16 to f32: normalize from i16::MIN..i16::MAX to -1.0..1.0
+                            s as f32 / 32768.0
+                        }).collect();
                         let mut lock = MIC_BUFFER.lock().unwrap();
                         lock.extend(buffer);
                     },
