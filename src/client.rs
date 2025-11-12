@@ -1445,6 +1445,11 @@ impl AudioHandler {
                             self.device_channel,
                         );
                     }
+                    
+                    // Feed client audio to echo cancellation buffer (Windows only)
+                    #[cfg(windows)]
+                    crate::server::audio_service::feed_client_audio(&buffer);
+                    
                     self.audio_buffer.append_pcm(&buffer);
                 }
                 #[cfg(target_os = "linux")]

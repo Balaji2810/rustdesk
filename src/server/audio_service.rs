@@ -74,6 +74,25 @@ pub fn set_voice_call_mixing(enabled: bool) {
     }
 }
 
+#[cfg(windows)]
+#[inline]
+pub fn feed_client_audio(audio_data: &[f32]) {
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        if *cpal_impl::IS_VOICE_CALL_ACTIVE.lock().unwrap() {
+            let mut buffer = cpal_impl::CLIENT_AUDIO_BUFFER.lock().unwrap();
+            buffer.extend(audio_data.iter().copied());
+            
+            // Prevent buffer from growing too large (keep max 2 seconds at 48kHz stereo)
+            const MAX_BUFFER_SIZE: usize = 48000 * 2 * 2;
+            if buffer.len() > MAX_BUFFER_SIZE {
+                let to_drop = buffer.len() - MAX_BUFFER_SIZE;
+                buffer.drain(0..to_drop);
+            }
+        }
+    }
+}
+
 #[inline]
 fn get_audio_input() -> String {
     VOICE_CALL_INPUT_DEVICE
@@ -204,6 +223,8 @@ mod cpal_impl {
         pub(super) static ref IS_VOICE_CALL_ACTIVE: Arc<Mutex<bool>> = Default::default();
         static ref SPEAKER_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+        // Buffer to track client audio for echo cancellation
+        pub static ref CLIENT_AUDIO_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
     }
 
     #[cfg(windows)]
@@ -439,8 +460,29 @@ mod cpal_impl {
         speaker_resampled.truncate(min_len);
         mic_resampled.truncate(min_len);
 
-        // Mix: 70% speaker + 30% mic
-        let mixed: Vec<f32> = speaker_resampled
+        // Echo cancellation: subtract client audio from speaker loopback
+        let mut speaker_clean = speaker_resampled.clone();
+        {
+            let mut client_lock = CLIENT_AUDIO_BUFFER.lock().unwrap();
+            if client_lock.len() >= min_len {
+                // Extract client audio samples for cancellation
+                let client_samples: Vec<f32> = client_lock.drain(0..min_len).collect();
+                
+                // Subtract client audio from speaker loopback with attenuation factor
+                // Use 0.9 to account for potential volume differences and delays
+                for i in 0..min_len {
+                    speaker_clean[i] -= client_samples[i] * 0.9;
+                    // Clamp to prevent overflow
+                    speaker_clean[i] = speaker_clean[i].clamp(-1.0, 1.0);
+                }
+            } else {
+                // Not enough client audio data, clear what we have
+                client_lock.clear();
+            }
+        }
+
+        // Mix: 70% speaker (with echo cancelled) + 30% mic
+        let mixed: Vec<f32> = speaker_clean
             .iter()
             .zip(mic_resampled.iter())
             .map(|(s, m)| s * 0.7 + m * 0.3)
@@ -587,6 +629,7 @@ mod cpal_impl {
         // Clear buffers
         SPEAKER_BUFFER.lock().unwrap().clear();
         MIC_BUFFER.lock().unwrap().clear();
+        CLIENT_AUDIO_BUFFER.lock().unwrap().clear();
         
         // Calculate frame sizes for synchronization
         let speaker_frame_size = speaker_rate as usize / 100; // 10ms
