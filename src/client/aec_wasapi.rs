@@ -108,8 +108,15 @@ impl WasapiAecAudioHandler {
                 // Get default render device
                 let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
                 
-                // Get audio client
-                let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+                // Get audio client - use proper COM activation
+                let mut audio_client_ptr = std::ptr::null_mut();
+                let hr = device.Activate(
+                    &IAudioClient::IID,
+                    CLSCTX_ALL.0 as u32,
+                    None,
+                    &mut audio_client_ptr,
+                )?;
+                let audio_client: IAudioClient = IAudioClient::from_raw(audio_client_ptr);
                 
                 // Try to get AudioClient3 interface (required for AEC)
                 match audio_client.cast::<IAudioClient3>() {
@@ -135,15 +142,12 @@ impl WasapiAecAudioHandler {
             log::info!("Initializing WASAPI AEC with sample_rate={}, channels={}", sample_rate, channels);
             
             // Initialize COM
-            match CoInitializeEx(None, COINIT_MULTITHREADED) {
-                Ok(_) => {
-                    self._com_initialized = true;
-                }
-                Err(e) => {
-                    // COM may already be initialized, which is OK
-                    log::warn!("COM initialization returned error (may already be initialized): {}", e);
-                    self._com_initialized = false; // Don't uninitialize if we didn't initialize
-                }
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            if hr.is_ok() || hr.0 == 1 {  // S_OK or S_FALSE (already initialized)
+                self._com_initialized = hr.is_ok(); // Only set true if we actually initialized it
+            } else {
+                log::warn!("COM initialization returned HRESULT: {:?}", hr);
+                self._com_initialized = false;
             }
 
             // Create device enumerator
@@ -180,7 +184,14 @@ impl WasapiAecAudioHandler {
             };
 
             // Activate audio client using proper COM activation
-            let audio_client: IAudioClient = render_device.Activate(CLSCTX_ALL, None)?;
+            let mut audio_client_ptr = std::ptr::null_mut();
+            render_device.Activate(
+                &IAudioClient::IID,
+                CLSCTX_ALL.0 as u32,
+                None,
+                &mut audio_client_ptr,
+            )?;
+            let audio_client: IAudioClient = IAudioClient::from_raw(audio_client_ptr);
 
             // Setup wave format for f32 stereo
             let wave_format = WAVEFORMATEX {
