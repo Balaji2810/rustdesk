@@ -1,12 +1,12 @@
 # WASAPI Acoustic Echo Cancellation (AEC) Implementation
 
-## Current Status: Full AEC Implementation with Windows COM
+## Current Status: Infrastructure in Place, Blocked by windows-rs Limitation
 
-✅ **Fully Implemented**: This implementation uses Windows COM interfaces directly via the `windows-rs` crate to provide proper WASAPI-based Acoustic Echo Cancellation (AEC) for RustDesk's client-side audio playback on Windows.
+⚠️ **Partially Implemented**: The WASAPI AEC infrastructure is in place, but full implementation is blocked by `windows-rs 0.61` not exposing the `IMMDevice::Activate` method needed for COM device activation. The system currently falls back to `cpal` audio.
 
 ## Overview
 
-This document describes the complete implementation of WASAPI-based Acoustic Echo Cancellation (AEC) for RustDesk's client-side audio playback on Windows, using direct COM interface access.
+This document describes the partial implementation of WASAPI-based Acoustic Echo Cancellation (AEC) for RustDesk's client-side audio playback on Windows. While the architecture and COM interfaces are defined, the implementation cannot be completed without upgrading `windows-rs` or using raw COM bindings.
 
 ## What is WASAPI AEC?
 
@@ -242,6 +242,29 @@ The `AudioHandler` in `client.rs` now:
 2. **Latency**
    - WASAPI AEC may add slight latency
    - This is normal for echo cancellation processing
+
+## Blocker: IMMDevice::Activate Not Available
+
+The implementation is blocked because `windows-rs 0.61` does not expose the `IMMDevice::Activate` method which is essential for:
+1. Activating the `IAudioClient` from an audio device
+2. Getting the render and capture endpoints
+3. Setting up the audio stream with AEC
+
+### Solutions to Unblock:
+
+1. **Upgrade windows-rs** (Recommended)
+   - Upgrade to `windows-rs 0.52+` which has better COM interface support
+   - Check if `IMMDevice::Activate` is exposed in newer versions
+
+2. **Use Raw COM Bindings**
+   - Manually define the COM vtable for `IMMDevice`
+   - Call `Activate` through raw function pointers
+   - More complex but works with current version
+
+3. **Hybrid Approach**
+   - Use `wasapi` crate for device activation
+   - Use `windows-rs` for AEC-specific interfaces
+   - Requires coordination between two crates
 
 ## Technical Implementation Details
 

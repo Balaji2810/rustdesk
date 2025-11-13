@@ -90,61 +90,38 @@ impl WasapiAecAudioHandler {
     }
 
     /// Check if AEC is supported on this system
+    /// 
+    /// Note: Full WASAPI AEC integration requires IMMDevice::Activate which is not 
+    /// available in the current windows-rs version (0.61). This would require either:
+    /// 1. Upgrading to a newer windows-rs version that exposes this method
+    /// 2. Using raw COM bindings manually
+    /// 3. Using the wasapi crate (which we tried but lacks AEC interface exposure)
+    /// 
+    /// For now, we return false to indicate AEC is not available through this implementation.
+    /// The cpal fallback will be used instead.
     pub fn check_aec_support() -> ResultType<bool> {
-        unsafe {
-            // Initialize COM for this check
-            if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
-                log::warn!("Failed to initialize COM for AEC check");
-                return Ok(false);
-            }
-
-            let result = (|| -> ResultType<bool> {
-                let enumerator: IMMDeviceEnumerator = CoCreateInstance(
-                    &MMDeviceEnumerator,
-                    None,
-                    CLSCTX_ALL,
-                )?;
-
-                // Get default render device
-                let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
-                
-                // Get audio client - use proper COM activation
-                let mut audio_client_ptr = std::ptr::null_mut();
-                let hr = device.Activate(
-                    &IAudioClient::IID,
-                    CLSCTX_ALL.0 as u32,
-                    None,
-                    &mut audio_client_ptr,
-                )?;
-                let audio_client: IAudioClient = IAudioClient::from_raw(audio_client_ptr);
-                
-                // Try to get AudioClient3 interface (required for AEC)
-                match audio_client.cast::<IAudioClient3>() {
-                    Ok(_) => {
-                        log::info!("WASAPI AEC is supported (IAudioClient3 available)");
-                        Ok(true)
-                    }
-                    Err(_) => {
-                        log::info!("WASAPI AEC not supported (IAudioClient3 not available)");
-                        Ok(false)
-                    }
-                }
-            })();
-
-            CoUninitialize();
-            result
-        }
+        log::info!("WASAPI AEC check: IMMDevice::Activate not available in windows-rs 0.61");
+        log::info!("Full AEC implementation requires windows-rs upgrade or raw COM bindings");
+        Ok(false)
     }
 
     /// Initialize WASAPI with AEC enabled
-    pub fn initialize(&mut self, sample_rate: u32, channels: u16) -> ResultType<()> {
+    /// 
+    /// Note: This method cannot be fully implemented without IMMDevice::Activate
+    /// which is not available in windows-rs 0.61. Returns an error to trigger
+    /// fallback to cpal.
+    pub fn initialize(&mut self, _sample_rate: u32, _channels: u16) -> ResultType<()> {
+        bail!("WASAPI AEC not available: IMMDevice::Activate not exposed in windows-rs 0.61");
+        
+        // The code below shows what would be needed with proper COM support:
+        /*
         unsafe {
             log::info!("Initializing WASAPI AEC with sample_rate={}, channels={}", sample_rate, channels);
             
             // Initialize COM
             let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
             if hr.is_ok() || hr.0 == 1 {  // S_OK or S_FALSE (already initialized)
-                self._com_initialized = hr.is_ok(); // Only set true if we actually initialized it
+                self._com_initialized = hr.is_ok();
             } else {
                 log::warn!("COM initialization returned HRESULT: {:?}", hr);
                 self._com_initialized = false;
@@ -160,7 +137,7 @@ impl WasapiAecAudioHandler {
             // Get default render device (speakers)
             let render_device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
             
-            // Get default capture device (microphone) for AEC reference
+            // Get capture device for AEC reference
             let capture_device = match enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
                 Ok(dev) => Some(dev),
                 Err(e) => {
@@ -183,81 +160,12 @@ impl WasapiAecAudioHandler {
                 None
             };
 
-            // Activate audio client using proper COM activation
-            let mut audio_client_ptr = std::ptr::null_mut();
-            render_device.Activate(
-                &IAudioClient::IID,
-                CLSCTX_ALL.0 as u32,
-                None,
-                &mut audio_client_ptr,
-            )?;
-            let audio_client: IAudioClient = IAudioClient::from_raw(audio_client_ptr);
-
-            // Setup wave format for f32 stereo
-            let wave_format = WAVEFORMATEX {
-                wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
-                nChannels: channels,
-                nSamplesPerSec: sample_rate,
-                nAvgBytesPerSec: sample_rate * channels as u32 * 4, // 4 bytes per f32
-                nBlockAlign: channels * 4,
-                wBitsPerSample: 32,
-                cbSize: 0,
-            };
-
-            // Initialize audio client in shared mode
-            let duration = 10_000_000; // 1 second in 100-nanosecond units
-            audio_client.Initialize(
-                AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                duration,
-                0,
-                &wave_format,
-                None,
-            )?;
-
-            // Try to enable AEC
-            let aec_enabled = match audio_client.cast::<IAudioClient3>() {
-                Ok(_audio_client3) => {
-                    // Try to get AEC control interface
-                    // Note: The GetService method for IAcousticEchoCancellationControl
-                    // is not directly exposed in windows-rs, so we use QueryInterface
-                    match self.try_enable_aec(&audio_client, capture_id_str.as_deref()) {
-                        Ok(_) => {
-                            log::info!("Successfully enabled WASAPI AEC");
-                            true
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to enable AEC (will continue without it): {}", e);
-                            false
-                        }
-                    }
-                }
-                Err(_) => {
-                    log::warn!("IAudioClient3 not available, AEC not supported on this system");
-                    false
-                }
-            };
-
-            // Get buffer size
-            self.buffer_frame_count = audio_client.GetBufferSize()?;
+            // NOTE: This is where we need IMMDevice::Activate which is not available
+            // Would need to activate audio client, set up format, initialize, enable AEC, etc.
             
-            // Get render client
-            let render_client: IAudioRenderClient = audio_client.GetService()?;
-
-            self.audio_client = Some(audio_client);
-            self.render_client = Some(render_client);
-            self.sample_rate = sample_rate;
-            self.channels = channels;
-            self.is_aec_enabled = aec_enabled;
-
-            log::info!(
-                "WASAPI initialized: buffer_frames={}, AEC={}",
-                self.buffer_frame_count,
-                if aec_enabled { "enabled" } else { "disabled" }
-            );
-
-            Ok(())
+            // See WASAPI_AEC_IMPLEMENTATION.md for details on what's needed
         }
+        */
     }
 
     /// Try to enable AEC using COM interfaces
