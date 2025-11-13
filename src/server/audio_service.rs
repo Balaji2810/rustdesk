@@ -461,6 +461,10 @@ mod cpal_impl {
         mic_resampled.truncate(min_len);
 
         // Echo cancellation: subtract client audio from speaker loopback
+        // NOTE: This is a simple fallback method. The client side now uses WASAPI AEC
+        // which provides much better echo cancellation using the microphone as reference.
+        // This server-side code is kept for backwards compatibility with non-Windows clients
+        // or when WASAPI AEC is not available.
         let mut speaker_clean = speaker_resampled.clone();
         {
             let mut client_lock = CLIENT_AUDIO_BUFFER.lock().unwrap();
