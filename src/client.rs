@@ -1354,7 +1354,7 @@ impl AudioHandler {
         {
             // Try to use WASAPI AEC on Windows
             log::info!("Attempting to use WASAPI AEC for audio playback");
-            match self.start_audio_with_wasapi_aec(format0) {
+            match self.start_audio_with_wasapi_aec(format0.clone()) {
                 Ok(_) => {
                     log::info!("Successfully initialized WASAPI AEC audio");
                     self.use_wasapi_aec = true;

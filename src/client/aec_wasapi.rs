@@ -1,18 +1,13 @@
 // WASAPI-based Acoustic Echo Cancellation (AEC) module for Windows
 // Full implementation using Windows COM interfaces for proper AEC support
 
-use hbb_common::{anyhow, bail, log, ResultType};
+use hbb_common::{bail, log, ResultType};
 use windows::core::{Interface, GUID, HRESULT};
 use windows::Win32::Media::Audio::{
-    eRender, eConsole, eCapture,
-    IAudioClient, IAudioClient3, IAudioRenderClient,
-    IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    WAVEFORMATEX,
+    IAudioClient, IAudioRenderClient,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize,
-    CLSCTX_ALL, COINIT_MULTITHREADED,
+    CoUninitialize,
 };
 
 // GUID for IAcousticEchoCancellationControl interface
@@ -169,7 +164,7 @@ impl WasapiAecAudioHandler {
     }
 
     /// Try to enable AEC using COM interfaces
-    unsafe fn try_enable_aec(&self, audio_client: &IAudioClient, capture_device_id: Option<&str>) -> ResultType<()> {
+    unsafe fn try_enable_aec(&self, _audio_client: &IAudioClient, capture_device_id: Option<&str>) -> ResultType<()> {
         // This is a simplified attempt - full implementation would need more COM plumbing
         // The IAcousticEchoCancellationControl interface is not fully exposed in windows-rs
         // For now, we log that we attempted it
