@@ -1353,22 +1353,15 @@ impl AudioHandler {
         #[cfg(target_os = "windows")]
         {
             // Try to use WASAPI AEC on Windows
-            if let Ok(aec_supported) = aec_wasapi::WasapiAecAudioHandler::check_aec_support() {
-                if aec_supported {
-                    log::info!("Attempting to use WASAPI AEC for audio playback");
-                    match self.start_audio_with_wasapi_aec(format0) {
-                        Ok(_) => {
-                            log::info!("Successfully initialized WASAPI AEC audio");
-                            self.use_wasapi_aec = true;
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to initialize WASAPI AEC, falling back to cpal: {}", e);
-                            self.use_wasapi_aec = false;
-                        }
-                    }
-                } else {
-                    log::info!("WASAPI AEC not supported, using cpal");
+            log::info!("Attempting to use WASAPI AEC for audio playback");
+            match self.start_audio_with_wasapi_aec(format0) {
+                Ok(_) => {
+                    log::info!("Successfully initialized WASAPI AEC audio");
+                    self.use_wasapi_aec = true;
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::warn!("Failed to initialize WASAPI AEC, falling back to cpal: {}", e);
                     self.use_wasapi_aec = false;
                 }
             }
@@ -1594,14 +1587,14 @@ impl AudioHandler {
 
         log::info!("Initializing WASAPI AEC audio handler");
         
-        let mut aec_handler = aec_wasapi::WasapiAecAudioHandler::new();
-        aec_handler.initialize(format0.sample_rate, format0.channels as u16)?;
-        aec_handler.start()?;
-        
-        let actual_sample_rate = aec_handler.get_sample_rate()
+        // Test initialization to verify WASAPI works
+        let mut test_handler = aec_wasapi::WasapiAecAudioHandler::new();
+        test_handler.initialize(format0.sample_rate, format0.channels as u16)?;
+        let actual_sample_rate = test_handler.get_sample_rate()
             .unwrap_or(format0.sample_rate);
-        let actual_channels = aec_handler.get_channels()
+        let actual_channels = test_handler.get_channels()
             .unwrap_or(format0.channels as u16);
+        drop(test_handler); // Drop the test handler
         
         self.sample_rate = (format0.sample_rate, actual_sample_rate);
         self.device_channel = actual_channels;
@@ -1610,26 +1603,29 @@ impl AudioHandler {
         // Setup audio buffer for WASAPI
         self.audio_buffer.resize(actual_sample_rate as _, actual_channels as _);
         
-        let aec_handler_arc = Arc::new(Mutex::new(aec_handler));
         let audio_buffer = self.audio_buffer.0.clone();
-        let aec_handler_clone = aec_handler_arc.clone();
+        let sample_rate = format0.sample_rate;
+        let channels = format0.channels;
         
-        // Spawn a thread to continuously write audio data from buffer to WASAPI
+        // Spawn a thread that owns the WASAPI handler (avoids Send/Sync issues)
         thread::spawn(move || {
             log::info!("WASAPI AEC playback thread started");
+            
+            // Create WASAPI handler in this thread (thread-local, no Send/Sync needed)
+            let mut handler = aec_wasapi::WasapiAecAudioHandler::new();
+            if let Err(e) = handler.initialize(sample_rate, channels as u16) {
+                log::error!("Failed to initialize WASAPI in playback thread: {}", e);
+                return;
+            }
+            if let Err(e) = handler.start() {
+                log::error!("Failed to start WASAPI stream: {}", e);
+                return;
+            }
+            
             let mut consecutive_errors = 0;
             const MAX_CONSECUTIVE_ERRORS: u32 = 100;
             
             loop {
-                // Check if handler is still valid
-                let handler_result = aec_handler_clone.lock();
-                if handler_result.is_err() {
-                    log::error!("Failed to lock WASAPI AEC handler");
-                    break;
-                }
-                
-                let mut handler = handler_result.unwrap();
-                
                 // Get data from buffer
                 let mut lock = audio_buffer.lock().unwrap();
                 let available = lock.occupied_len();
@@ -1673,7 +1669,7 @@ impl AudioHandler {
             log::info!("WASAPI AEC playback thread exiting");
         });
         
-        self.wasapi_aec = Some(aec_handler_arc);
+        self.wasapi_aec = None; // We don't store the handler since it's thread-local now
         self.ready = Arc::new(Mutex::new(true));
         
         log::info!("WASAPI AEC audio playback initialized successfully");

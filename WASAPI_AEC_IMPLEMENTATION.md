@@ -1,8 +1,12 @@
 # WASAPI Acoustic Echo Cancellation (AEC) Implementation
 
+## Current Status: Full AEC Implementation with Windows COM
+
+✅ **Fully Implemented**: This implementation uses Windows COM interfaces directly via the `windows-rs` crate to provide proper WASAPI-based Acoustic Echo Cancellation (AEC) for RustDesk's client-side audio playback on Windows.
+
 ## Overview
 
-This document describes the implementation of WASAPI-based Acoustic Echo Cancellation (AEC) for RustDesk's client-side audio playback on Windows.
+This document describes the complete implementation of WASAPI-based Acoustic Echo Cancellation (AEC) for RustDesk's client-side audio playback on Windows, using direct COM interface access.
 
 ## What is WASAPI AEC?
 
@@ -68,23 +72,33 @@ Client Side (Windows):
 
 #### 1. WasapiAecAudioHandler
 
-Main class for WASAPI AEC audio management:
+Main class for WASAPI AEC audio management using Windows COM interfaces:
 
 ```rust
 pub struct WasapiAecAudioHandler {
-    audio_client: Option<AudioClient>,
-    render_client: Option<AudioRenderClient>,
-    format: Option<WaveFormat>,
+    audio_client: Option<IAudioClient>,
+    render_client: Option<IAudioRenderClient>,
+    sample_rate: u32,
+    channels: u16,
     buffer_frame_count: u32,
-    is_aec_supported: bool,
+    is_aec_enabled: bool,
+    _com_initialized: bool,
 }
 ```
 
 **Key Methods:**
-- `check_aec_support()` - Verifies if AEC is available on the system
-- `initialize()` - Sets up WASAPI with AEC enabled
+- `check_aec_support()` - Verifies IAudioClient3 availability for AEC
+- `initialize()` - Sets up WASAPI with AEC using COM interfaces
+- `try_enable_aec()` - Attempts to enable AEC with microphone reference
 - `start()`/`stop()` - Controls the audio stream
-- `write_data()` - Writes audio data through AEC processing
+- `write_data()` - Writes audio data through AEC-enabled stream
+
+**COM Interfaces Used:**
+- `IAudioClient` / `IAudioClient3` - Core WASAPI audio client
+- `IAudioRenderClient` - Audio rendering
+- `IMMDeviceEnumerator` - Device enumeration
+- `IMMDevice` - Audio device management
+- `IAcousticEchoCancellationControl` - AEC control (manually defined)
 
 #### 2. AudioHandler Integration
 
@@ -229,9 +243,59 @@ The `AudioHandler` in `client.rs` now:
    - WASAPI AEC may add slight latency
    - This is normal for echo cancellation processing
 
+## Technical Implementation Details
+
+### COM Interface Access
+
+The implementation uses direct Windows COM APIs via `windows-rs`:
+
+```rust
+use windows::Win32::Media::Audio::{
+    IAudioClient, IAudioClient3, IAudioRenderClient,
+    IMMDevice, IMMDeviceEnumerator,
+};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize,
+};
+```
+
+### AEC Enablement Process
+
+1. **Initialize COM** - `CoInitializeEx(COINIT_MULTITHREADED)`
+2. **Get Devices** - Enumerate render (speaker) and capture (microphone) devices
+3. **Create Audio Client** - Activate `IAudioClient` on render device
+4. **Check AEC Support** - Cast to `IAudioClient3` to verify AEC capability
+5. **Enable AEC** - Use `IAcousticEchoCancellationControl` interface
+6. **Start Stream** - Begin audio playback with AEC active
+
+### IAcousticEchoCancellationControl
+
+This interface is manually defined since it's not yet in `windows-rs`:
+
+```rust
+const IID_IACOUSTIC_ECHO_CANCELLATION_CONTROL: GUID = 
+    GUID::from_u128(0xf4ade780_0a0f_11e7_93ae_92361f002671);
+
+#[repr(C)]
+pub struct IAcousticEchoCancellationControl {
+    __vtable: *const IAcousticEchoCancellationControlVtbl,
+}
+```
+
+The interface provides `SetEchoCancellationRenderEndpoint()` to configure the microphone as the AEC reference.
+
+### Fallback Behavior
+
+If AEC initialization fails:
+- Logs warning message
+- Falls back to standard cpal audio
+- System continues to work without AEC
+- Server-side echo cancellation remains active
+
 ## References
 
 - [WASAPI Documentation](https://learn.microsoft.com/en-us/windows/win32/coreaudio/wasapi)
 - [Acoustic Echo Cancellation Sample](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/acousticechocancellation/)
 - [wasapi crate documentation](https://docs.rs/wasapi/latest/wasapi/)
+- [windows-rs crate](https://github.com/microsoft/windows-rs) - For direct COM interface access
 
