@@ -1,28 +1,31 @@
 // WASAPI-based Acoustic Echo Cancellation (AEC) module for Windows
 // Full implementation using Windows COM interfaces for proper AEC support
 
-use hbb_common::{bail, log, ResultType};
+use hbb_common::{anyhow, bail, log, ResultType};
 use windows::core::{Interface, GUID, HRESULT};
-use windows::Win32::Foundation::{HANDLE, S_OK};
 use windows::Win32::Media::Audio::{
     eRender, eConsole, eCapture,
-    IAudioClient, IAudioClient3, IAudioRenderClient, IAudioCaptureClient,
-    IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
+    IAudioClient, IAudioClient3, IAudioRenderClient,
+    IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    WAVEFORMATEX, WAVE_FORMAT_IEEE_FLOAT,
+    WAVEFORMATEX,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize,
-    CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+    CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
 // GUID for IAcousticEchoCancellationControl interface
 // {f4ade780-0a0f-11e7-93ae-92361f002671}
 const IID_IACOUSTIC_ECHO_CANCELLATION_CONTROL: GUID = GUID::from_u128(0xf4ade780_0a0f_11e7_93ae_92361f002671);
 
+// WAVE_FORMAT_IEEE_FLOAT constant (not exposed in windows-rs audio bindings)
+const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
+
 // COM interface for Acoustic Echo Cancellation Control
 // This isn't exposed in windows-rs yet, so we define it manually
 #[repr(C)]
+#[derive(Clone)]
 #[allow(non_snake_case)]
 pub struct IAcousticEchoCancellationControl {
     __vtable: *const IAcousticEchoCancellationControlVtbl,
@@ -160,7 +163,7 @@ impl WasapiAecAudioHandler {
 
             // Setup wave format for f32 stereo
             let wave_format = WAVEFORMATEX {
-                wFormatTag: WAVE_FORMAT_IEEE_FLOAT as u16,
+                wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
                 nChannels: channels,
                 nSamplesPerSec: sample_rate,
                 nAvgBytesPerSec: sample_rate * channels as u32 * 4, // 4 bytes per f32
