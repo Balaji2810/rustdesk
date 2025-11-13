@@ -6,7 +6,7 @@ use windows::core::{Interface, GUID, HRESULT};
 use windows::Win32::Media::Audio::{
     eRender, eConsole, eCapture,
     IAudioClient, IAudioClient3, IAudioRenderClient,
-    IMMDeviceEnumerator, MMDeviceEnumerator,
+    IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
     WAVEFORMATEX,
 };
@@ -51,6 +51,7 @@ struct IAcousticEchoCancellationControlVtbl {
 }
 
 unsafe impl Interface for IAcousticEchoCancellationControl {
+    type Vtable = IAcousticEchoCancellationControlVtbl;
     const IID: GUID = IID_IACOUSTIC_ECHO_CANCELLATION_CONTROL;
 }
 
@@ -134,9 +135,16 @@ impl WasapiAecAudioHandler {
             log::info!("Initializing WASAPI AEC with sample_rate={}, channels={}", sample_rate, channels);
             
             // Initialize COM
-            CoInitializeEx(None, COINIT_MULTITHREADED)
-                .map_err(|e| anyhow::anyhow!("Failed to initialize COM: {}", e))?;
-            self._com_initialized = true;
+            match CoInitializeEx(None, COINIT_MULTITHREADED) {
+                Ok(_) => {
+                    self._com_initialized = true;
+                }
+                Err(e) => {
+                    // COM may already be initialized, which is OK
+                    log::warn!("COM initialization returned error (may already be initialized): {}", e);
+                    self._com_initialized = false; // Don't uninitialize if we didn't initialize
+                }
+            }
 
             // Create device enumerator
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(
@@ -149,16 +157,29 @@ impl WasapiAecAudioHandler {
             let render_device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
             
             // Get default capture device (microphone) for AEC reference
-            let capture_device = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)
-                .map_err(|e| anyhow::anyhow!("Failed to get capture device for AEC: {}", e))?;
+            let capture_device = match enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
+                Ok(dev) => Some(dev),
+                Err(e) => {
+                    log::warn!("Failed to get capture device for AEC: {}", e);
+                    None
+                }
+            };
             
             // Get capture device ID for AEC
-            let capture_id = capture_device.GetId()?;
-            let capture_id_str = capture_id.to_string()?;
-            
-            log::info!("AEC reference device ID: {}", capture_id_str);
+            let capture_id_str = if let Some(ref cap_dev) = capture_device {
+                match cap_dev.GetId() {
+                    Ok(id) => {
+                        let id_str = id.to_string().unwrap_or_default();
+                        log::info!("AEC reference device ID: {}", id_str);
+                        Some(id_str)
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
 
-            // Activate audio client
+            // Activate audio client using proper COM activation
             let audio_client: IAudioClient = render_device.Activate(CLSCTX_ALL, None)?;
 
             // Setup wave format for f32 stereo
@@ -189,7 +210,7 @@ impl WasapiAecAudioHandler {
                     // Try to get AEC control interface
                     // Note: The GetService method for IAcousticEchoCancellationControl
                     // is not directly exposed in windows-rs, so we use QueryInterface
-                    match self.try_enable_aec(&audio_client, &capture_id_str) {
+                    match self.try_enable_aec(&audio_client, capture_id_str.as_deref()) {
                         Ok(_) => {
                             log::info!("Successfully enabled WASAPI AEC");
                             true
@@ -229,11 +250,15 @@ impl WasapiAecAudioHandler {
     }
 
     /// Try to enable AEC using COM interfaces
-    unsafe fn try_enable_aec(&self, audio_client: &IAudioClient, capture_device_id: &str) -> ResultType<()> {
+    unsafe fn try_enable_aec(&self, audio_client: &IAudioClient, capture_device_id: Option<&str>) -> ResultType<()> {
         // This is a simplified attempt - full implementation would need more COM plumbing
         // The IAcousticEchoCancellationControl interface is not fully exposed in windows-rs
         // For now, we log that we attempted it
-        log::info!("Attempting to enable AEC with capture device: {}", capture_device_id);
+        if let Some(device_id) = capture_device_id {
+            log::info!("Attempting to enable AEC with capture device: {}", device_id);
+        } else {
+            log::warn!("No capture device available for AEC");
+        }
         
         // In a full implementation, you would:
         // 1. Get the IAudioClient3 interface
