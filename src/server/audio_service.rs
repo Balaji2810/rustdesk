@@ -24,6 +24,40 @@ static RESTARTING: AtomicBool = AtomicBool::new(false);
 
 lazy_static::lazy_static! {
     static ref VOICE_CALL_INPUT_DEVICE: Arc::<Mutex::<Option<String>>> = Default::default();
+    pub static ref PLAYED_AUDIO_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+    pub static ref PLAYED_AUDIO_INFO: Arc<Mutex<(u32, u16)>> = Arc::new(Mutex::new((0, 0)));
+}
+
+pub fn push_played_audio(data: &[f32], rate: u32, channels: u16) {
+    let target_rate = 48000;
+    let target_channels = 2;
+
+    let mut processed_data = if rate != target_rate {
+        crate::common::audio_resample(data, rate, target_rate, channels as _)
+    } else {
+        data.to_vec()
+    };
+
+    if channels != target_channels as u16 {
+        processed_data = crate::common::audio_rechannel(
+            processed_data,
+            target_rate,
+            target_rate,
+            channels as _,
+            target_channels as _,
+        );
+    }
+
+    let mut buffer = PLAYED_AUDIO_BUFFER.lock().unwrap();
+    
+    buffer.extend(processed_data);
+    
+    // Keep max 500ms (48000 * 2 * 0.5 = 48000 samples)
+    let max_samples = 48000;
+    if buffer.len() > max_samples {
+         let overflow = buffer.len() - max_samples;
+         buffer.drain(0..overflow);
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -388,6 +422,95 @@ mod cpal_impl {
     }
 
     #[cfg(windows)]
+    fn calculate_correlation(x: &[f32], y: &[f32]) -> f32 {
+        let mut sum_xx = 0.0;
+        let mut sum_yy = 0.0;
+        let mut sum_xy = 0.0;
+
+        for (a, b) in x.iter().zip(y.iter()) {
+            sum_xx += a * a;
+            sum_yy += b * b;
+            sum_xy += a * b;
+        }
+
+        if sum_xx * sum_yy == 0.0 {
+            0.0
+        } else {
+            sum_xy / (sum_xx * sum_yy).sqrt()
+        }
+    }
+
+    #[cfg(windows)]
+    fn apply_aec(speaker: &mut [f32], reference: &[f32]) {
+        // Constants
+        const DECIMATE: usize = 8;
+
+        if reference.len() < speaker.len() {
+            return;
+        }
+
+        let ref_len = reference.len();
+        let spk_len = speaker.len();
+
+        // Downsample for coarse search
+        let spk_down: Vec<f32> = speaker.iter().step_by(DECIMATE).copied().collect();
+        let ref_down: Vec<f32> = reference.iter().step_by(DECIMATE).copied().collect();
+
+        let spk_d_len = spk_down.len();
+        let ref_d_len = ref_down.len();
+
+        let search_range = ref_d_len.saturating_sub(spk_d_len);
+        if search_range == 0 { return; }
+
+        let mut best_corr = 0.0;
+        let mut best_off_d = 0;
+
+        // Coarse search
+        for i in 0..search_range {
+            let corr = calculate_correlation(&spk_down, &ref_down[i..i+spk_d_len]);
+            if corr > best_corr {
+                best_corr = corr;
+                best_off_d = i;
+            }
+        }
+
+        if best_corr < 0.3 { // Threshold
+            return;
+        }
+
+        // Refine
+        let mut refined_corr = 0.0;
+        let mut best_off = 0;
+
+        let coarse_off = best_off_d * DECIMATE;
+        let start = coarse_off.saturating_sub(DECIMATE);
+        let end = (coarse_off + DECIMATE).min(ref_len - spk_len);
+
+        for i in start..=end {
+             let corr = calculate_correlation(speaker, &reference[i..i+spk_len]);
+             if corr > refined_corr {
+                 refined_corr = corr;
+                 best_off = i;
+             }
+        }
+
+        if refined_corr > 0.4 {
+            let ref_segment = &reference[best_off..best_off+spk_len];
+            let dot_sr: f32 = speaker.iter().zip(ref_segment.iter()).map(|(s,r)| s*r).sum();
+            let dot_rr: f32 = ref_segment.iter().map(|r| r*r).sum();
+
+            if dot_rr > 0.0 {
+                let scale = dot_sr / dot_rr;
+                 let scale = scale.clamp(0.0, 2.0);
+
+                 for (s, r) in speaker.iter_mut().zip(ref_segment.iter()) {
+                     *s -= r * scale;
+                 }
+            }
+        }
+    }
+
+    #[cfg(windows)]
     fn mix_and_send(
         speaker_data: Vec<f32>,
         mic_data: Vec<f32>,
@@ -432,6 +555,17 @@ mod cpal_impl {
                 mic_channels,
                 target_channels,
             );
+        }
+
+        // Apply AEC
+        {
+            let reference_buffer = PLAYED_AUDIO_BUFFER.lock().unwrap();
+            let reference: Vec<f32> = reference_buffer.iter().copied().collect();
+            drop(reference_buffer);
+            
+            if !reference.is_empty() {
+                apply_aec(&mut speaker_resampled, &reference);
+            }
         }
 
         // Ensure both have the same length (use minimum)

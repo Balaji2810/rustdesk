@@ -1445,6 +1445,9 @@ impl AudioHandler {
                             self.device_channel,
                         );
                     }
+                    #[cfg(windows)]
+                    crate::server::audio_service::push_played_audio(&buffer, sample_rate, self.device_channel);
+
                     self.audio_buffer.append_pcm(&buffer);
                 }
                 #[cfg(target_os = "linux")]
