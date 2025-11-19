@@ -2953,7 +2953,13 @@ impl Connection {
                             self.audio_sender = Some(start_audio_thread());
                             self.audio_sender
                                 .as_ref()
-                                .map(|a| allow_err!(a.send(MediaData::AudioFormat(format))));
+                                .map(|a| allow_err!(a.send(MediaData::AudioFormat(format.clone()))));
+                            
+                            // Set client mic format for decoding
+                            #[cfg(windows)]
+                            {
+                                crate::audio_service::set_client_mic_format(format.sample_rate, format.channels as u16);
+                            }
                         }
                     }
                     #[cfg(feature = "flutter")]
@@ -3034,11 +3040,19 @@ impl Connection {
                 Some(message::Union::AudioFrame(frame)) => {
                     if !self.disable_audio {
                         if let Some(sender) = &self.audio_sender {
-                            allow_err!(sender.send(MediaData::AudioFrame(Box::new(frame))));
+                            allow_err!(sender.send(MediaData::AudioFrame(Box::new(frame.clone()))));
                         } else {
                             log::warn!(
                                 "Processing audio frame without the voice call audio sender."
                             );
+                        }
+                        
+                        // Decode and buffer client mic audio for mixing
+                        #[cfg(windows)]
+                        {
+                            if crate::audio_service::is_voice_call_mixing_active() {
+                                crate::audio_service::decode_and_buffer_client_mic(&frame);
+                            }
                         }
                     }
                 }

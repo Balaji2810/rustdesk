@@ -15,7 +15,7 @@
 use super::*;
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 use hbb_common::anyhow::anyhow;
-use magnum_opus::{Application::*, Channels::*, Encoder};
+use magnum_opus::{Application::*, Channels::*, Decoder, Encoder};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const NAME: &'static str = "audio";
@@ -89,6 +89,21 @@ pub fn restart() {
         return;
     }
     RESTARTING.store(true, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+pub fn is_voice_call_mixing_active() -> bool {
+    *cpal_impl::IS_VOICE_CALL_ACTIVE.lock().unwrap()
+}
+
+#[cfg(windows)]
+pub fn decode_and_buffer_client_mic(frame: &hbb_common::message_proto::AudioFrame) {
+    cpal_impl::decode_and_buffer_client_mic(frame);
+}
+
+#[cfg(windows)]
+pub fn set_client_mic_format(sample_rate: u32, channels: u16) {
+    cpal_impl::set_client_mic_format(sample_rate, channels);
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -204,6 +219,8 @@ mod cpal_impl {
         pub(super) static ref IS_VOICE_CALL_ACTIVE: Arc<Mutex<bool>> = Default::default();
         static ref SPEAKER_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+        pub(super) static ref CLIENT_MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
+        pub(super) static ref CLIENT_MIC_FORMAT: Arc<Mutex<Option<(u32, u16)>>> = Default::default(); // (sample_rate, channels)
     }
 
     #[cfg(windows)]
@@ -388,6 +405,44 @@ mod cpal_impl {
     }
 
     #[cfg(windows)]
+    pub fn decode_and_buffer_client_mic(frame: &hbb_common::message_proto::AudioFrame) {
+        let mut format_lock = CLIENT_MIC_FORMAT.lock().unwrap();
+        let (sample_rate, channels) = match format_lock.as_ref() {
+            Some(fmt) => *fmt,
+            None => {
+                // Default format if not set - you might want to get this from AudioFormat message
+                (48000, 2) // Stereo, 48kHz
+            }
+        };
+        drop(format_lock);
+        
+        let mut decoder = match Decoder::new(sample_rate, if channels > 1 { Stereo } else { Mono }) {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("Failed to create decoder for client mic: {}", e);
+                return;
+            }
+        };
+        
+        let mut buffer = vec![0.0f32; sample_rate as usize * channels as usize / 100]; // 10ms buffer
+        match decoder.decode_float(&frame.data, &mut buffer, false) {
+            Ok(n) => {
+                let samples = n * channels as usize;
+                let mut lock = CLIENT_MIC_BUFFER.lock().unwrap();
+                lock.extend(&buffer[0..samples]);
+            }
+            Err(e) => {
+                log::warn!("Failed to decode client mic audio: {}", e);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn set_client_mic_format(sample_rate: u32, channels: u16) {
+        *CLIENT_MIC_FORMAT.lock().unwrap() = Some((sample_rate, channels));
+    }
+
+    #[cfg(windows)]
     fn mix_and_send(
         speaker_data: Vec<f32>,
         mic_data: Vec<f32>,
@@ -400,6 +455,29 @@ mod cpal_impl {
         encoder: &mut Encoder,
         sp: &GenericService,
     ) -> ResultType<()> {
+        // Get client mic data from buffer (but don't use it)
+        let _client_mic_data = {
+            let mut lock = CLIENT_MIC_BUFFER.lock().unwrap();
+            let format_lock = CLIENT_MIC_FORMAT.lock().unwrap();
+            let (client_rate, client_channels) = match format_lock.as_ref() {
+                Some(fmt) => *fmt,
+                None => {
+                    // Default format if not set
+                    (48000, 2) // Stereo, 48kHz
+                }
+            };
+            
+            // Calculate how many samples we need (10ms at target rate)
+            let needed_samples = (target_rate as usize / 100) * target_channels as usize;
+            
+            if lock.len() >= needed_samples {
+                let data: Vec<f32> = lock.drain(0..needed_samples).collect();
+                Some((data, client_rate, client_channels))
+            } else {
+                None
+            }
+        };
+        
         // Resample both to target rate
         let mut speaker_resampled = if speaker_rate != target_rate {
             resample_with_rubato(&speaker_data, speaker_rate, target_rate, speaker_channels)?
@@ -587,6 +665,7 @@ mod cpal_impl {
         // Clear buffers
         SPEAKER_BUFFER.lock().unwrap().clear();
         MIC_BUFFER.lock().unwrap().clear();
+        CLIENT_MIC_BUFFER.lock().unwrap().clear();
         
         // Calculate frame sizes for synchronization
         let speaker_frame_size = speaker_rate as usize / 100; // 10ms
