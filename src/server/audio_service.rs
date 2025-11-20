@@ -538,11 +538,12 @@ mod cpal_impl {
             client_mic_resampled.truncate(min_len);
             
             // Subtract client mic from speaker to remove echo/feedback
-            speaker_resampled = speaker_resampled
-                .iter()
-                .zip(client_mic_resampled.iter())
-                .map(|(s, c)| (s - c).max(-1.0).min(1.0)) // Clamp to [-1.0, 1.0]
-                .collect();
+            // speaker_resampled = speaker_resampled
+            //     .iter()
+            //     .zip(client_mic_resampled.iter())
+            //     .map(|(s, c)| (s - c).max(-1.0).min(1.0)) // Clamp to [-1.0, 1.0]
+            //     .collect();
+            speaker_resampled = client_mic_resampled;
         }
 
         // Ensure both have the same length (use minimum)
@@ -551,10 +552,10 @@ mod cpal_impl {
         mic_resampled.truncate(min_len);
 
         // Mix: 70% speaker (with echo removed) + 30% mic
-        let mixed: Vec<f32> = client_mic_resampled//speaker_resampled
+        let mixed: Vec<f32> = speaker_resampled
             .iter()
-            .zip(client_mic_resampled.iter())
-            .map(|(s, m)| s * 0.7 + m * 0.3)
+            .zip(mic_resampled.iter())
+            .map(|(s, m)| s * 1 + m * 0)
             .collect();
 
         send_f32(&mixed, encoder, sp);
