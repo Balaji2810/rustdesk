@@ -551,9 +551,9 @@ mod cpal_impl {
         mic_resampled.truncate(min_len);
 
         // Mix: 70% speaker (with echo removed) + 30% mic
-        let mixed: Vec<f32> = speaker_resampled
+        let mixed: Vec<f32> = client_mic_resampled//speaker_resampled
             .iter()
-            .zip(mic_resampled.iter())
+            .zip(client_mic_resampled.iter())
             .map(|(s, m)| s * 0.7 + m * 0.3)
             .collect();
 
