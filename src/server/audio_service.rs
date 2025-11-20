@@ -455,8 +455,8 @@ mod cpal_impl {
         encoder: &mut Encoder,
         sp: &GenericService,
     ) -> ResultType<()> {
-        // Get client mic data from buffer (but don't use it)
-        let _client_mic_data = {
+        // Get client mic data from buffer
+        let client_mic_data = {
             let mut lock = CLIENT_MIC_BUFFER.lock().unwrap();
             let format_lock = CLIENT_MIC_FORMAT.lock().unwrap();
             let (client_rate, client_channels) = match format_lock.as_ref() {
@@ -512,12 +512,45 @@ mod cpal_impl {
             );
         }
 
+        // Process client mic data: resample, rechannel, and subtract from speaker to prevent echo
+        if let Some((client_mic_raw, client_rate, client_channels)) = client_mic_data {
+            // Resample client mic to target rate
+            let mut client_mic_resampled = if client_rate != target_rate {
+                resample_with_rubato(&client_mic_raw, client_rate, target_rate, client_channels)?
+            } else {
+                client_mic_raw
+            };
+            
+            // Rechannel client mic to target channels
+            if client_channels != target_channels {
+                client_mic_resampled = crate::common::audio_rechannel(
+                    client_mic_resampled,
+                    target_rate,
+                    target_rate,
+                    client_channels,
+                    target_channels,
+                );
+            }
+            
+            // Ensure same length (use minimum)
+            let min_len = speaker_resampled.len().min(client_mic_resampled.len());
+            speaker_resampled.truncate(min_len);
+            client_mic_resampled.truncate(min_len);
+            
+            // Subtract client mic from speaker to remove echo/feedback
+            speaker_resampled = speaker_resampled
+                .iter()
+                .zip(client_mic_resampled.iter())
+                .map(|(s, c)| (s - c).max(-1.0).min(1.0)) // Clamp to [-1.0, 1.0]
+                .collect();
+        }
+
         // Ensure both have the same length (use minimum)
         let min_len = speaker_resampled.len().min(mic_resampled.len());
         speaker_resampled.truncate(min_len);
         mic_resampled.truncate(min_len);
 
-        // Mix: 70% speaker + 30% mic
+        // Mix: 70% speaker (with echo removed) + 30% mic
         let mixed: Vec<f32> = speaker_resampled
             .iter()
             .zip(mic_resampled.iter())
