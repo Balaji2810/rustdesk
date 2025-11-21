@@ -221,6 +221,7 @@ mod cpal_impl {
         static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         pub(super) static ref CLIENT_MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         pub(super) static ref CLIENT_MIC_FORMAT: Arc<Mutex<Option<(u32, u16)>>> = Default::default(); // (sample_rate, channels)
+        pub(super) static ref CLIENT_MIC_DECODER: Arc<Mutex<Option<(Decoder, u32, u16)>>> = Default::default();
     }
 
     #[cfg(windows)]
@@ -416,23 +417,37 @@ mod cpal_impl {
         };
         drop(format_lock);
         
-        let mut decoder = match Decoder::new(sample_rate, if channels > 1 { Stereo } else { Mono }) {
-            Ok(d) => d,
-            Err(e) => {
-                log::error!("Failed to create decoder for client mic: {}", e);
-                return;
-            }
-        };
+        let mut decoder_lock = CLIENT_MIC_DECODER.lock().unwrap();
         
-        let mut buffer = vec![0.0f32; sample_rate as usize * channels as usize / 100]; // 10ms buffer
-        match decoder.decode_float(&frame.data, &mut buffer, false) {
-            Ok(n) => {
-                let samples = n * channels as usize;
-                let mut lock = CLIENT_MIC_BUFFER.lock().unwrap();
-                lock.extend(&buffer[0..samples]);
+        // Check if we need to create or recreate decoder
+        let needs_create = match decoder_lock.as_ref() {
+            Some((_, r, c)) => *r != sample_rate || *c != channels,
+            None => true,
+        };
+
+        if needs_create {
+             match Decoder::new(sample_rate, if channels > 1 { Stereo } else { Mono }) {
+                Ok(d) => {
+                    *decoder_lock = Some((d, sample_rate, channels));
+                }
+                Err(e) => {
+                    log::error!("Failed to create decoder for client mic: {}", e);
+                    return;
+                }
             }
-            Err(e) => {
-                log::warn!("Failed to decode client mic audio: {}", e);
+        }
+        
+        if let Some((decoder, _, _)) = decoder_lock.as_mut() {
+             let mut buffer = vec![0.0f32; sample_rate as usize * channels as usize / 100]; // 10ms buffer
+             match decoder.decode_float(&frame.data, &mut buffer, false) {
+                Ok(n) => {
+                    let samples = n * channels as usize;
+                    let mut lock = CLIENT_MIC_BUFFER.lock().unwrap();
+                    lock.extend(&buffer[0..samples]);
+                }
+                Err(e) => {
+                    log::warn!("Failed to decode client mic audio: {}", e);
+                }
             }
         }
     }
@@ -467,8 +482,8 @@ mod cpal_impl {
                 }
             };
             
-            // Calculate how many samples we need (10ms at target rate)
-            let needed_samples = (target_rate as usize / 100) * target_channels as usize;
+            // Calculate how many samples we need (10ms at client rate)
+            let needed_samples = (client_rate as usize / 100) * client_channels as usize;
             
             if lock.len() >= needed_samples {
                 let data: Vec<f32> = lock.drain(0..needed_samples).collect();
