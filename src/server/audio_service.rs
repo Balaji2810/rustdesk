@@ -489,8 +489,7 @@ mod cpal_impl {
         speaker_resampled.truncate(min_len);
         mic_resampled.truncate(min_len);
 
-        // For testing:Zero out speaker volume
-        speaker_resampled.fill(0.0);
+        
 
         // Apply Digital Echo Cancellation to remove client audio from speaker loopback
         // The client audio reference buffer contains the decoded client audio that was played
