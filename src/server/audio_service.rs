@@ -245,7 +245,7 @@ mod cpal_impl {
         /// Stores decoded client audio at 48kHz stereo for echo cancellation
         pub(crate) static ref CLIENT_AUDIO_REF_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         /// AEC filter for stereo audio processing
-        static ref AEC_FILTERS: Arc<Mutex<(crate::aec::NlmsFilter, crate::aec::NlmsFilter)>> = 
+        pub(super) static ref AEC_FILTERS: Arc<Mutex<(crate::aec::NlmsFilter, crate::aec::NlmsFilter)>> = 
             Arc::new(Mutex::new(crate::aec::create_stereo_aec(960, 0.3)));
     }
 
