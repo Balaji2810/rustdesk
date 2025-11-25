@@ -19,6 +19,8 @@ use crate::{
     },
     display_service, ipc, privacy_mode, video_service, VERSION,
 };
+#[cfg(windows)]
+use magnum_opus::{Channels::*, Decoder as AudioDecoder};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::{common::DEVICE_NAME, flutter::connection_manager::start_channel};
 use cidr_utils::cidr::IpCidr;
@@ -295,6 +297,13 @@ pub struct Connection {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     terminal_user_token: Option<TerminalUserToken>,
     terminal_generic_service: Option<Box<GenericService>>,
+    /// Audio decoder for AEC (Acoustic Echo Cancellation) reference signal
+    /// Decodes client audio to push to the AEC reference buffer
+    #[cfg(windows)]
+    aec_audio_decoder: Option<(AudioDecoder, Vec<f32>)>,
+    /// Audio format info for AEC decoder (sample_rate, channels)
+    #[cfg(windows)]
+    aec_audio_format: Option<(u32, u16)>,
 }
 
 impl ConnInner {
@@ -464,6 +473,10 @@ impl Connection {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             terminal_user_token: None,
             terminal_generic_service: None,
+            #[cfg(windows)]
+            aec_audio_decoder: None,
+            #[cfg(windows)]
+            aec_audio_format: None,
         };
         let addr = hbb_common::try_into_v4(addr);
         if !conn.on_open(addr).await {
@@ -2953,7 +2966,27 @@ impl Connection {
                             self.audio_sender = Some(start_audio_thread());
                             self.audio_sender
                                 .as_ref()
-                                .map(|a| allow_err!(a.send(MediaData::AudioFormat(format))));
+                                .map(|a| allow_err!(a.send(MediaData::AudioFormat(format.clone()))));
+                            
+                            // Initialize AEC decoder for client audio reference
+                            #[cfg(windows)]
+                            {
+                                let channels = if format.channels > 1 { Stereo } else { Mono };
+                                match AudioDecoder::new(format.sample_rate, channels) {
+                                    Ok(decoder) => {
+                                        let buffer_size = format.sample_rate as usize * format.channels as usize;
+                                        self.aec_audio_decoder = Some((decoder, vec![0.0f32; buffer_size]));
+                                        self.aec_audio_format = Some((format.sample_rate, format.channels as u16));
+                                        log::info!("AEC decoder initialized: {}Hz, {} channels", 
+                                            format.sample_rate, format.channels);
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to create AEC audio decoder: {}", e);
+                                        self.aec_audio_decoder = None;
+                                        self.aec_audio_format = None;
+                                    }
+                                }
+                            }
                         }
                     }
                     #[cfg(feature = "flutter")]
@@ -3033,6 +3066,43 @@ impl Connection {
                 },
                 Some(message::Union::AudioFrame(frame)) => {
                     if !self.disable_audio {
+                        // Decode and push to AEC reference buffer (Windows only, during voice call)
+                        #[cfg(windows)]
+                        if self.voice_calling {
+                            if let Some((decoder, buffer)) = self.aec_audio_decoder.as_mut() {
+                                if let Some((sample_rate, channels)) = self.aec_audio_format {
+                                    if let Ok(n) = decoder.decode_float(&frame.data, buffer, false) {
+                                        let n_samples = n * channels as usize;
+                                        let mut decoded = buffer[0..n_samples].to_vec();
+                                        
+                                        // Resample to 48kHz if needed
+                                        if sample_rate != 48000 {
+                                            decoded = crate::common::audio_resample(
+                                                &decoded,
+                                                sample_rate,
+                                                48000,
+                                                channels,
+                                            );
+                                        }
+                                        
+                                        // Rechannel to stereo if needed
+                                        if channels != 2 {
+                                            decoded = crate::common::audio_rechannel(
+                                                decoded,
+                                                48000,
+                                                48000,
+                                                channels,
+                                                2,
+                                            );
+                                        }
+                                        
+                                        // Push to AEC reference buffer
+                                        super::audio_service::push_client_audio_ref(&decoded);
+                                    }
+                                }
+                            }
+                        }
+                        
                         if let Some(sender) = &self.audio_sender {
                             allow_err!(sender.send(MediaData::AudioFrame(Box::new(frame))));
                         } else {
