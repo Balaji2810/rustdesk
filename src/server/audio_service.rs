@@ -92,7 +92,8 @@ pub fn push_client_audio_ref(samples: &[f32]) {
         if buffer.len() + samples.len() > MAX_BUFFER_SIZE {
             // Drop oldest samples to make room
             let to_drop = (buffer.len() + samples.len()).saturating_sub(MAX_BUFFER_SIZE);
-            buffer.drain(0..to_drop.min(buffer.len()));
+            let drain_count = to_drop.min(buffer.len());
+            buffer.drain(0..drain_count);
         }
         buffer.extend(samples.iter().copied());
     }
