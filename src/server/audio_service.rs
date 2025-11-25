@@ -105,10 +105,8 @@ pub fn clear_client_audio_ref_buffer() {
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         cpal_impl::CLIENT_AUDIO_REF_BUFFER.lock().unwrap().clear();
-        // Also reset the AEC filters
-        let mut filters = cpal_impl::AEC_FILTERS.lock().unwrap();
-        filters.0.reset();
-        filters.1.reset();
+        // Also reset the digital echo canceller
+        cpal_impl::DIGITAL_EC.lock().unwrap().reset();
     }
 }
 
@@ -242,12 +240,12 @@ mod cpal_impl {
         pub(super) static ref IS_VOICE_CALL_ACTIVE: Arc<Mutex<bool>> = Default::default();
         static ref SPEAKER_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         static ref MIC_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
-        /// Buffer for client audio reference signal (used for AEC)
+        /// Buffer for client audio reference signal (used for echo cancellation)
         /// Stores decoded client audio at 48kHz stereo for echo cancellation
         pub(crate) static ref CLIENT_AUDIO_REF_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
-        /// AEC filter for stereo audio processing
-        pub(super) static ref AEC_FILTERS: Arc<Mutex<(crate::aec::NlmsFilter, crate::aec::NlmsFilter)>> = 
-            Arc::new(Mutex::new(crate::aec::create_stereo_aec(960, 0.3)));
+        /// Digital Echo Canceller for real-time echo cancellation (stereo)
+        pub(super) static ref DIGITAL_EC: Arc<Mutex<crate::aec::DigitalEchoCanceller>> = 
+            Arc::new(Mutex::new(crate::aec::DigitalEchoCanceller::new_stereo()));
     }
 
     #[cfg(windows)]
@@ -491,14 +489,14 @@ mod cpal_impl {
         speaker_resampled.truncate(min_len);
         mic_resampled.truncate(min_len);
 
-        // Apply AEC (Acoustic Echo Cancellation) to remove client audio from speaker loopback
+        // Apply Digital Echo Cancellation to remove client audio from speaker loopback
         // The client audio reference buffer contains the decoded client audio that was played
         // on the server's speakers and captured in the loopback
         let client_ref = drain_client_ref_samples(min_len);
         let speaker_cleaned = if !client_ref.is_empty() {
-            // Apply stereo AEC processing
-            let mut aec_filters = AEC_FILTERS.lock().unwrap();
-            crate::aec::process_stereo(&mut aec_filters, &client_ref, &speaker_resampled)
+            // Apply digital echo cancellation (optimized for digital echo paths)
+            let mut dec = DIGITAL_EC.lock().unwrap();
+            crate::aec::process_buffer(&mut dec, &client_ref, &speaker_resampled)
         } else {
             // No client reference available, pass through unchanged
             speaker_resampled
