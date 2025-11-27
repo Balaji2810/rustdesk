@@ -450,9 +450,14 @@ mod cpal_impl {
         encoder: &mut Encoder,
         sp: &GenericService,
     ) -> ResultType<()> {
+
+        let pitch_factor: f32 = 1.3; 
+
+        let intermediate_rate = (target_rate as f32 / pitch_factor) as u32;
+
         // Resample both to target rate
-        let mut speaker_resampled = if speaker_rate != target_rate {
-            resample_with_rubato(&speaker_data, speaker_rate, target_rate, speaker_channels)?
+        let mut speaker_resampled = if speaker_rate != intermediate_rate {
+            resample_with_rubato(&speaker_data, speaker_rate, intermediate_rate, speaker_channels)?
         } else {
             speaker_data
         };
