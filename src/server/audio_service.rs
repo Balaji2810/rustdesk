@@ -500,7 +500,7 @@ mod cpal_impl {
         let client_ref = drain_client_ref_samples(min_len);
 
         // Adjust volume: 1.0 = 100%, 0.5 = 50%, 2.0 = 200%
-        let volume_gain: f32 = 2.0; // Example: 200% volume
+        let volume_gain: f32 = 1.0; // Example: 200% volume
         let client_ref: Vec<f32> = client_ref.iter().map(|s| s * volume_gain).collect();
 
 
@@ -517,7 +517,7 @@ mod cpal_impl {
         let mixed: Vec<f32> = speaker_cleaned
             .iter()
             .zip(mic_resampled.iter())
-            .map(|(s, m)| s * 0.7 + m * 0.3)
+            .map(|(s, m)| s * 0.2 + m * 0.3)
             .collect();
 
         send_f32(&mixed, encoder, sp);
