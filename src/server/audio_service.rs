@@ -501,22 +501,24 @@ mod cpal_impl {
 
         // // Adjust volume: 1.0 = 100%, 0.5 = 50%, 2.0 = 200%
         let volume_gain: f32 = 0.2; 
-        let speaker_resampled: Vec<f32> = speaker_resampled.iter().map(|s| s * volume_gain).collect();
+        let client_ref: Vec<f32> = client_ref.iter().map(|s| s * volume_gain).collect();
 
 
-        let speaker_cleaned = if !client_ref.is_empty() {
-            // Apply digital echo cancellation (optimized for digital echo paths)
-            let mut dec = DIGITAL_EC.lock().unwrap();
-            crate::aec::process_buffer(&mut dec, &client_ref, &speaker_resampled)
-        } else {
-            // No client reference available, pass through unchanged
-            speaker_resampled
-        };
+        // let speaker_cleaned = if !client_ref.is_empty() {
+        //     // Apply digital echo cancellation (optimized for digital echo paths)
+        //     let mut dec = DIGITAL_EC.lock().unwrap();
+        //     crate::aec::process_buffer(&mut dec, &client_ref, &speaker_resampled)
+        // } else {
+        //     // No client reference available, pass through unchanged
+        //     speaker_resampled
+        // };
+
+        let speaker_cleaned = speaker_resampled;
 
         // Mix: 70% speaker (echo-cancelled) + 30% mic
         let mixed: Vec<f32> = speaker_cleaned
             .iter()
-            .zip(mic_resampled.iter())
+            .zip(client_ref.iter())
             .map(|(s, m)| s * 0.7 + m * 0.3)
             .collect();
 
