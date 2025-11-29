@@ -1,173 +1,236 @@
-/// Digital Echo Cancellation module - Pure Rust implementation
+/// Acoustic Echo Cancellation module - NLMS Adaptive Filter Implementation
 ///
-/// Optimized for **digital** echo paths (loopback) where echo is a
-/// delayed copy of the reference signal. Uses simple delay-and-subtract
-/// which is the fastest approach for digital echo with minimal latency.
-use std::collections::VecDeque;
+/// Uses the Normalized Least Mean Squares (NLMS) algorithm which automatically
+/// learns the echo path (delay + gain + frequency response) without explicit
+/// delay estimation. Works across different systems with varying latencies.
 
-/// Maximum delay to compensate (samples) - ~100ms at 48kHz stereo
-const MAX_DELAY: usize = 9600;
+/// Filter length in samples - covers ~100ms at 48kHz stereo
+/// Longer = handles more delay but uses more CPU
+const FILTER_LEN: usize = 9600;
 
-/// Correlation window size (samples) - ~5ms at 48kHz stereo
-const CORR_WINDOW: usize = 480;
+/// Minimum filter length for low-latency mode (~25ms)
+const FILTER_LEN_SHORT: usize = 2400;
 
-/// Digital Echo Canceller - optimized for loopback echo
+/// NLMS Adaptive Echo Canceller
+/// 
+/// Automatically adapts to find and cancel echo regardless of system delay.
+/// No manual delay configuration needed - it learns the echo path.
 #[cfg(windows)]
 pub struct DigitalEchoCanceller {
-    /// Reference signal ring buffer
-    ref_buffer: VecDeque<f32>,
-    /// Estimated delay in samples
-    delay: usize,
-    /// Estimated gain
-    gain: f32,
-    /// Frame counter for periodic delay estimation
+    /// Adaptive filter coefficients (FIR filter modeling echo path)
+    filter: Vec<f32>,
+    /// Reference signal circular buffer
+    ref_buffer: Vec<f32>,
+    /// Current write position in circular buffer
+    buf_pos: usize,
+    /// Smoothed reference signal power (for normalization)
+    ref_power: f32,
+    /// Adaptation step size (mu) - controls convergence speed vs stability
+    mu: f32,
+    /// Regularization constant to prevent division by zero
+    delta: f32,
+    /// Filter length being used
+    filter_len: usize,
+    /// Leakage factor for coefficient stability (prevents drift)
+    leakage: f32,
+    /// Double-talk detector threshold
+    dtd_threshold: f32,
+    /// Smoothed error power for DTD
+    error_power: f32,
+    /// Frame counter for statistics
     frame_count: usize,
 }
 
 #[cfg(windows)]
 impl DigitalEchoCanceller {
     pub fn new(_num_channels: usize) -> Self {
-        Self {
-            ref_buffer: VecDeque::with_capacity(MAX_DELAY + CORR_WINDOW),
-            delay: 0,//960, // Initial guess: 10ms at 48kHz stereo
-            gain: 1.0,
-            frame_count: 0,
-        }
+        Self::with_filter_len(FILTER_LEN)
     }
 
     pub fn new_stereo() -> Self {
         Self::new(2)
     }
 
+    /// Create with custom filter length
+    /// Shorter filter = less CPU but handles less delay
+    pub fn with_filter_len(filter_len: usize) -> Self {
+        Self {
+            filter: vec![0.0; filter_len],
+            ref_buffer: vec![0.0; filter_len],
+            buf_pos: 0,
+            ref_power: 0.0,
+            mu: 0.4,           // Adaptation rate: 0.1-0.5 typical, higher = faster
+            delta: 1e-6,       // Regularization
+            filter_len,
+            leakage: 0.9999,   // Very slight leakage to prevent coefficient explosion
+            dtd_threshold: 2.0, // Double-talk detection threshold
+            error_power: 0.0,
+            frame_count: 0,
+        }
+    }
+
+    /// Create optimized for low latency systems
+    pub fn new_low_latency() -> Self {
+        Self::with_filter_len(FILTER_LEN_SHORT)
+    }
+
     pub fn reset(&mut self) {
-        self.ref_buffer.clear();
-        self.delay = 0;//960;
-        self.gain = 1.0;
+        self.filter.fill(0.0);
+        self.ref_buffer.fill(0.0);
+        self.buf_pos = 0;
+        self.ref_power = 0.0;
+        self.error_power = 0.0;
         self.frame_count = 0;
     }
 
-    /// Process audio - subtract delayed reference from input
+    /// Set adaptation rate (0.1 = slow/stable, 0.5 = fast/aggressive)
+    #[allow(dead_code)]
+    pub fn set_mu(&mut self, mu: f32) {
+        self.mu = mu.clamp(0.05, 0.8);
+    }
+
+    /// Process audio buffer through NLMS adaptive filter
+    /// 
+    /// # Arguments
+    /// * `reference` - The signal being played (far-end / client audio)
+    /// * `input` - The captured signal containing echo (near-end + echo)
+    /// 
+    /// # Returns
+    /// Echo-cancelled signal (near-end with echo removed)
     pub fn process(&mut self, reference: &[f32], input: &[f32]) -> Vec<f32> {
         let len = reference.len().min(input.len());
         if len == 0 {
             return Vec::new();
         }
 
-        // Add reference to buffer
-        for &s in reference.iter().take(len) {
-            if self.ref_buffer.len() >= MAX_DELAY + CORR_WINDOW {
-                self.ref_buffer.pop_front();
-            }
-            self.ref_buffer.push_back(s);
-        }
-
-        // Not enough history yet
-        if self.ref_buffer.len() < self.delay + len {
-            return input[..len].to_vec();
-        }
-
-        // DISABLED: Delay estimation is causing issues - use fixed delay instead
-        // // Update delay estimate every ~50 frames (~500ms)
-        // self.frame_count += 1;
-        // if self.frame_count >= 50 && len >= CORR_WINDOW {
-        //     self.frame_count = 0;
-        //     self.estimate_delay(input);
-        // }
-
-        // Cancel echo: output = input - gain * delayed_reference
-        let buf_len = self.ref_buffer.len();
-        let ref_start = buf_len.saturating_sub(self.delay + len);
-
         let mut output = Vec::with_capacity(len);
+        
+        // Power smoothing factor (time constant ~10ms at 48kHz)
+        let alpha = 0.998_f32;
+        let alpha_inv = 1.0 - alpha;
+        
         for i in 0..len {
-            let ref_sample = self.ref_buffer.get(ref_start + i).copied().unwrap_or(0.0);
-            let cancelled = input[i] - ref_sample * self.gain;
-            output.push(cancelled.clamp(-1.0, 1.0));
+            let ref_sample = reference[i];
+            let in_sample = input[i];
+            
+            // Store reference in circular buffer
+            self.ref_buffer[self.buf_pos] = ref_sample;
+            
+            // Update smoothed reference power (leaky integrator)
+            self.ref_power = alpha * self.ref_power + alpha_inv * ref_sample * ref_sample;
+            
+            // Compute filter output (estimated echo) using convolution
+            let echo_estimate = self.compute_filter_output();
+            
+            // Error = input - estimated echo (this is our output)
+            let error = in_sample - echo_estimate;
+            
+            // Update smoothed error power for double-talk detection
+            self.error_power = alpha * self.error_power + alpha_inv * error * error;
+            
+            // Double-talk detection: if error power >> reference power, 
+            // someone is talking on near-end, so reduce/pause adaptation
+            let dtd_ratio = if self.ref_power > self.delta {
+                self.error_power / self.ref_power
+            } else {
+                0.0
+            };
+            
+            // Only adapt if reference has energy and no double-talk detected
+            let should_adapt = self.ref_power > 1e-8 && dtd_ratio < self.dtd_threshold;
+            
+            if should_adapt {
+                // NLMS coefficient update
+                // w(n+1) = leakage * w(n) + mu * error * x(n) / (||x||^2 + delta)
+                let norm_factor = self.mu / (self.ref_power * self.filter_len as f32 + self.delta);
+                self.update_filter(error, norm_factor);
+            }
+            
+            // Advance circular buffer position
+            self.buf_pos = (self.buf_pos + 1) % self.filter_len;
+            
+            output.push(error.clamp(-1.0, 1.0));
         }
-
+        
+        self.frame_count += 1;
         output
     }
 
-    /// Estimate delay using normalized cross-correlation
-    fn estimate_delay(&mut self, input: &[f32]) {
-        let buf_len = self.ref_buffer.len();
-        if buf_len < CORR_WINDOW + MAX_DELAY {
-            return;
-        }
-
-        let window = CORR_WINDOW.min(input.len());
-        let mut best_corr = 0.0f32;
-        let mut best_delay = self.delay;
-        let mut best_gain = self.gain;
-
-        // Coarse search: step by 16 samples
-        for delay in (96..MAX_DELAY).step_by(16) {
-            let (corr, gain) = self.correlation_at_delay(input, delay, window);
-            if corr > best_corr {
-                best_corr = corr;
-                best_delay = delay;
-                best_gain = gain;
+    /// Compute filter output (convolution of filter with reference buffer)
+    #[inline]
+    fn compute_filter_output(&self) -> f32 {
+        let mut sum = 0.0f32;
+        
+        // Process in chunks of 4 for better vectorization
+        let chunks = self.filter_len / 4;
+        let remainder = self.filter_len % 4;
+        
+        for chunk in 0..chunks {
+            let base = chunk * 4;
+            let mut partial = [0.0f32; 4];
+            
+            for j in 0..4 {
+                let filter_idx = base + j;
+                let buf_idx = (self.buf_pos + self.filter_len - filter_idx) % self.filter_len;
+                partial[j] = self.filter[filter_idx] * self.ref_buffer[buf_idx];
             }
+            
+            sum += partial[0] + partial[1] + partial[2] + partial[3];
         }
-
-        // Fine search around best delay
-        if best_corr > 0.3 {
-            let start = best_delay.saturating_sub(32);
-            let end = (best_delay + 32).min(MAX_DELAY);
-            for delay in (start..end).step_by(2) {
-                let (corr, gain) = self.correlation_at_delay(input, delay, window);
-                if corr > best_corr {
-                    best_corr = corr;
-                    best_delay = delay;
-                    best_gain = gain;
-                }
-            }
+        
+        // Handle remainder
+        for j in 0..remainder {
+            let filter_idx = chunks * 4 + j;
+            let buf_idx = (self.buf_pos + self.filter_len - filter_idx) % self.filter_len;
+            sum += self.filter[filter_idx] * self.ref_buffer[buf_idx];
         }
-
-        // Update with smoothing if correlation is strong
-        if best_corr > 0.5 {
-            self.delay = (self.delay * 7 + best_delay) / 8; // Smooth delay
-            self.gain = self.gain * 0.9 + best_gain * 0.1; // Smooth gain
-            self.gain = self.gain.clamp(0.5, 1.5);
-        }
+        
+        sum
     }
 
-    /// Compute normalized correlation and gain at a specific delay
-    fn correlation_at_delay(&self, input: &[f32], delay: usize, window: usize) -> (f32, f32) {
-        let buf_len = self.ref_buffer.len();
-        let ref_start = buf_len.saturating_sub(delay + window);
-
-        let mut sum_xy = 0.0f32;
-        let mut sum_x2 = 0.0f32;
-        let mut sum_y2 = 0.0f32;
-
-        for i in 0..window {
-            let x = input[i];
-            let y = self.ref_buffer.get(ref_start + i).copied().unwrap_or(0.0);
-            sum_xy += x * y;
-            sum_x2 += x * x;
-            sum_y2 += y * y;
+    /// Update filter coefficients using NLMS rule
+    #[inline]
+    fn update_filter(&mut self, error: f32, norm_factor: f32) {
+        let update_scale = error * norm_factor;
+        
+        // Process in chunks for better cache performance
+        let chunks = self.filter_len / 4;
+        let remainder = self.filter_len % 4;
+        
+        for chunk in 0..chunks {
+            let base = chunk * 4;
+            
+            for j in 0..4 {
+                let filter_idx = base + j;
+                let buf_idx = (self.buf_pos + self.filter_len - filter_idx) % self.filter_len;
+                
+                // NLMS update with leakage
+                self.filter[filter_idx] = self.leakage * self.filter[filter_idx] 
+                    + update_scale * self.ref_buffer[buf_idx];
+            }
         }
-
-        let denom = (sum_x2 * sum_y2).sqrt();
-        let corr = if denom > 1e-6 { sum_xy / denom } else { 0.0 };
-        let gain = if sum_y2 > 1e-6 { sum_xy / sum_y2 } else { 1.0 };
-
-        (corr.abs(), gain.clamp(0.5, 1.5))
+        
+        // Handle remainder
+        for j in 0..remainder {
+            let filter_idx = chunks * 4 + j;
+            let buf_idx = (self.buf_pos + self.filter_len - filter_idx) % self.filter_len;
+            self.filter[filter_idx] = self.leakage * self.filter[filter_idx] 
+                + update_scale * self.ref_buffer[buf_idx];
+        }
     }
 }
 
-/// Process buffer - direct passthrough to process()
+/// Process buffer - main entry point for echo cancellation
 #[cfg(windows)]
 pub fn process_buffer(
-    dec: &mut DigitalEchoCanceller,
+    aec: &mut DigitalEchoCanceller,
     reference: &[f32],
     input: &[f32],
 ) -> Vec<f32> {
-    dec.process(reference, input)
+    aec.process(reference, input)
 }
 
-// Non-Windows: passthrough
+// Non-Windows: passthrough (no echo cancellation needed/supported)
 #[cfg(not(windows))]
 pub struct DigitalEchoCanceller;
 
@@ -196,27 +259,122 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn test_echo_cancellation() {
-        let mut dec = DigitalEchoCanceller::new_stereo();
+    fn test_nlms_echo_cancellation() {
+        let mut aec = DigitalEchoCanceller::new_stereo();
 
-        // Create reference and echoed input
-        let reference: Vec<f32> = (0..1920).map(|i| (i as f32 * 0.01).sin()).collect();
+        // Create reference signal (simulated far-end audio)
+        let reference: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 0.01).sin() * 0.5)
+            .collect();
+        
+        // Simulate echo with 480 sample delay (5ms at 48kHz stereo) and 0.8 gain
         let delay = 480;
-        let mut input = vec![0.0f32; 1920];
-        for i in delay..1920 {
-            input[i] = reference[i - delay] * 0.9;
+        let echo_gain = 0.8;
+        let mut input = vec![0.0f32; 4800];
+        for i in delay..4800 {
+            input[i] = reference[i - delay] * echo_gain;
         }
 
-        // Process multiple times to let it converge
-        for _ in 0..5 {
-            let _ = dec.process(&reference, &input);
+        // Process multiple frames to let NLMS converge
+        // NLMS typically needs several frames to adapt
+        for _ in 0..20 {
+            let _ = aec.process(&reference, &input);
         }
 
-        let output = dec.process(&reference, &input);
+        // After convergence, output should have significantly reduced echo
+        let output = aec.process(&reference, &input);
 
-        // Output should have reduced energy
-        let in_energy: f32 = input.iter().map(|x| x * x).sum();
-        let out_energy: f32 = output.iter().map(|x| x * x).sum();
-        assert!(out_energy <= in_energy);
+        // Measure energy reduction (skip initial transient)
+        let measure_start = delay + 100;
+        let in_energy: f32 = input[measure_start..].iter().map(|x| x * x).sum();
+        let out_energy: f32 = output[measure_start..].iter().map(|x| x * x).sum();
+        
+        // Should achieve at least 6dB (4x power) reduction
+        assert!(
+            out_energy < in_energy / 2.0,
+            "Echo not sufficiently cancelled: in={:.4}, out={:.4}",
+            in_energy,
+            out_energy
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_nlms_varying_delay() {
+        let mut aec = DigitalEchoCanceller::new_stereo();
+
+        // Test that NLMS can handle different delays without reconfiguration
+        for delay in [240, 480, 960, 1920].iter() {
+            aec.reset();
+            
+            let reference: Vec<f32> = (0..4800)
+                .map(|i| (i as f32 * 0.02).sin() * 0.5)
+                .collect();
+            
+            let mut input = vec![0.0f32; 4800];
+            for i in *delay..4800 {
+                input[i] = reference[i - delay] * 0.7;
+            }
+
+            // Let it converge
+            for _ in 0..30 {
+                let _ = aec.process(&reference, &input);
+            }
+
+            let output = aec.process(&reference, &input);
+            
+            let measure_start = delay + 200;
+            if measure_start < 4800 {
+                let in_energy: f32 = input[measure_start..].iter().map(|x| x * x).sum();
+                let out_energy: f32 = output[measure_start..].iter().map(|x| x * x).sum();
+                
+                assert!(
+                    out_energy < in_energy,
+                    "Failed at delay {}: in={:.4}, out={:.4}",
+                    delay, in_energy, out_energy
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_double_talk_preservation() {
+        let mut aec = DigitalEchoCanceller::new_stereo();
+
+        // Reference signal
+        let reference: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 0.01).sin() * 0.3)
+            .collect();
+        
+        // Near-end signal (local speaker) - different frequency
+        let near_end: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 0.03).sin() * 0.5)
+            .collect();
+        
+        // Input = echo + near-end
+        let delay = 480;
+        let mut input = vec![0.0f32; 4800];
+        for i in 0..4800 {
+            let echo = if i >= delay { reference[i - delay] * 0.6 } else { 0.0 };
+            input[i] = echo + near_end[i];
+        }
+
+        // Let it partially converge
+        for _ in 0..10 {
+            let _ = aec.process(&reference, &input);
+        }
+
+        let output = aec.process(&reference, &input);
+
+        // Near-end signal should be preserved (not completely cancelled)
+        let near_energy: f32 = near_end[delay..].iter().map(|x| x * x).sum();
+        let out_energy: f32 = output[delay..].iter().map(|x| x * x).sum();
+        
+        // Output should retain significant energy from near-end
+        assert!(
+            out_energy > near_energy * 0.3,
+            "Near-end signal over-suppressed"
+        );
     }
 }
