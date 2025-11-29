@@ -29,7 +29,7 @@ impl DigitalEchoCanceller {
     pub fn new(_num_channels: usize) -> Self {
         Self {
             ref_buffer: VecDeque::with_capacity(MAX_DELAY + CORR_WINDOW),
-            delay: 960, // Initial guess: 10ms at 48kHz stereo
+            delay: 0,//960, // Initial guess: 10ms at 48kHz stereo
             gain: 1.0,
             frame_count: 0,
         }
@@ -41,7 +41,7 @@ impl DigitalEchoCanceller {
 
     pub fn reset(&mut self) {
         self.ref_buffer.clear();
-        self.delay = 960;
+        self.delay = 0;//960;
         self.gain = 1.0;
         self.frame_count = 0;
     }
@@ -66,12 +66,13 @@ impl DigitalEchoCanceller {
             return input[..len].to_vec();
         }
 
-        // Update delay estimate every ~50 frames (~500ms)
-        self.frame_count += 1;
-        if self.frame_count >= 50 && len >= CORR_WINDOW {
-            self.frame_count = 0;
-            self.estimate_delay(input);
-        }
+        // DISABLED: Delay estimation is causing issues - use fixed delay instead
+        // // Update delay estimate every ~50 frames (~500ms)
+        // self.frame_count += 1;
+        // if self.frame_count >= 50 && len >= CORR_WINDOW {
+        //     self.frame_count = 0;
+        //     self.estimate_delay(input);
+        // }
 
         // Cancel echo: output = input - gain * delayed_reference
         let buf_len = self.ref_buffer.len();

@@ -499,9 +499,9 @@ mod cpal_impl {
         // on the server's speakers and captured in the loopback
         let client_ref = drain_client_ref_samples(min_len);
 
-        // Adjust volume: 1.0 = 100%, 0.5 = 50%, 2.0 = 200%
-        let volume_gain: f32 = 0.2; // Example: 200% volume
-        let client_ref: Vec<f32> = client_ref.iter().map(|s| s * volume_gain).collect();
+        // // Adjust volume: 1.0 = 100%, 0.5 = 50%, 2.0 = 200%
+        // let volume_gain: f32 = 1.0; // Example: 200% volume
+        // let client_ref: Vec<f32> = client_ref.iter().map(|s| s * volume_gain).collect();
 
 
         let speaker_cleaned = if !client_ref.is_empty() {
