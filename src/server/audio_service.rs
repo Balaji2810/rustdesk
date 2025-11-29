@@ -87,11 +87,11 @@ pub fn push_client_audio_ref(samples: &[f32]) {
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let mut buffer = cpal_impl::CLIENT_AUDIO_REF_BUFFER.lock().unwrap();
-        // Buffer size to hold playback latency worth of audio plus working data
-        // Playback latency is ~500ms, so we keep ~1.5 seconds at 48kHz stereo
-        const MAX_BUFFER_SIZE: usize = 48000 * 2 * 3 / 2; // 1.5 seconds at 48kHz stereo
+        // Keep buffer small to minimize latency - only ~200ms max
+        // This ensures client_ref stays synchronized with speaker loopback
+        const MAX_BUFFER_SIZE: usize = 48000 * 2 / 5; // 200ms at 48kHz stereo
         if buffer.len() + samples.len() > MAX_BUFFER_SIZE {
-            // Drop oldest samples to make room
+            // Drop oldest samples to make room - prevents accumulation lag
             let to_drop = (buffer.len() + samples.len()).saturating_sub(MAX_BUFFER_SIZE);
             let drain_count = to_drop.min(buffer.len());
             buffer.drain(0..drain_count);
@@ -430,31 +430,26 @@ mod cpal_impl {
         Ok(crate::common::audio_resample(data, from_rate, to_rate, channels))
     }
 
-    /// Estimated playback latency in samples (48kHz stereo)
-    /// ~500ms = 48000 * 0.5 * 2 channels = 48000 samples
-    const PLAYBACK_LATENCY_SAMPLES: usize = 48000;
+    /// Target buffer size - keep buffer small to minimize latency
+    /// ~50ms at 48kHz stereo = 4800 samples (allows some jitter tolerance)
+    const TARGET_BUFFER_SIZE: usize = 48000 * 2 / 20; // 50ms at 48kHz stereo
 
     /// Drain samples from the client audio reference buffer for AEC processing
-    /// Only returns samples that have been in the buffer long enough to account
-    /// for playback latency (i.e., samples that should now be playing on speakers)
+    /// Keeps buffer lean to ensure fresh samples that match current speaker loopback
     #[cfg(windows)]
     fn drain_client_ref_samples(count: usize) -> Vec<f32> {
         let mut buffer = CLIENT_AUDIO_REF_BUFFER.lock().unwrap();
         
-        // Only drain if we have enough samples to account for playback latency
-        // This ensures the drained samples correspond to what's currently playing
-        if buffer.len() <= PLAYBACK_LATENCY_SAMPLES {
-            // Not enough data accumulated yet - buffer needs to fill up first
-            // Return empty to avoid using incorrectly-timed reference
-            return Vec::new();
+        // If buffer has grown too large, discard old samples to stay synchronized
+        // This prevents accumulation lag where we'd be using stale reference audio
+        if buffer.len() > TARGET_BUFFER_SIZE + count {
+            let excess = buffer.len() - TARGET_BUFFER_SIZE;
+            log::trace!("AEC buffer excess: {} samples, discarding to stay sync'd", excess);
+            buffer.drain(0..excess);
         }
         
-        // Calculate how many samples we can safely drain
-        // (total - latency buffer = samples that have "aged" enough)
-        let available_for_drain = buffer.len() - PLAYBACK_LATENCY_SAMPLES;
-        let drain_count = available_for_drain.min(count);
-        
-        buffer.drain(0..drain_count).collect()
+        let available = buffer.len().min(count);
+        buffer.drain(0..available).collect()
     }
 
     #[cfg(windows)]
