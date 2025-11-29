@@ -87,8 +87,9 @@ pub fn push_client_audio_ref(samples: &[f32]) {
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let mut buffer = cpal_impl::CLIENT_AUDIO_REF_BUFFER.lock().unwrap();
-        // Limit buffer size to prevent memory growth (keep ~1 second of audio at 48kHz stereo)
-        const MAX_BUFFER_SIZE: usize = 48000 * 2; // 1 second at 48kHz stereo
+        // Buffer size to hold playback latency worth of audio plus working data
+        // Playback latency is ~500ms, so we keep ~1.5 seconds at 48kHz stereo
+        const MAX_BUFFER_SIZE: usize = 48000 * 2 * 3 / 2; // 1.5 seconds at 48kHz stereo
         if buffer.len() + samples.len() > MAX_BUFFER_SIZE {
             // Drop oldest samples to make room
             let to_drop = (buffer.len() + samples.len()).saturating_sub(MAX_BUFFER_SIZE);
@@ -429,12 +430,31 @@ mod cpal_impl {
         Ok(crate::common::audio_resample(data, from_rate, to_rate, channels))
     }
 
+    /// Estimated playback latency in samples (48kHz stereo)
+    /// ~500ms = 48000 * 0.5 * 2 channels = 48000 samples
+    const PLAYBACK_LATENCY_SAMPLES: usize = 48000;
+
     /// Drain samples from the client audio reference buffer for AEC processing
+    /// Only returns samples that have been in the buffer long enough to account
+    /// for playback latency (i.e., samples that should now be playing on speakers)
     #[cfg(windows)]
     fn drain_client_ref_samples(count: usize) -> Vec<f32> {
         let mut buffer = CLIENT_AUDIO_REF_BUFFER.lock().unwrap();
-        let available = buffer.len().min(count);
-        buffer.drain(0..available).collect()
+        
+        // Only drain if we have enough samples to account for playback latency
+        // This ensures the drained samples correspond to what's currently playing
+        if buffer.len() <= PLAYBACK_LATENCY_SAMPLES {
+            // Not enough data accumulated yet - buffer needs to fill up first
+            // Return empty to avoid using incorrectly-timed reference
+            return Vec::new();
+        }
+        
+        // Calculate how many samples we can safely drain
+        // (total - latency buffer = samples that have "aged" enough)
+        let available_for_drain = buffer.len() - PLAYBACK_LATENCY_SAMPLES;
+        let drain_count = available_for_drain.min(count);
+        
+        buffer.drain(0..drain_count).collect()
     }
 
     #[cfg(windows)]
@@ -499,27 +519,27 @@ mod cpal_impl {
         // on the server's speakers and captured in the loopback
         let client_ref = drain_client_ref_samples(min_len);
 
-        // // Adjust volume: 1.0 = 100%, 0.5 = 50%, 2.0 = 200%
+        // Adjust volume: 1.0 = 100%, 0.5 = 50%, 2.0 = 200%
         let volume_gain: f32 = 0.2; 
         let client_ref: Vec<f32> = client_ref.iter().map(|s| s * volume_gain).collect();
 
 
-        let speaker_cleaned = if !client_ref.is_empty() {
-            // Apply digital echo cancellation (optimized for digital echo paths)
-            let mut dec = DIGITAL_EC.lock().unwrap();
-            crate::aec::process_buffer(&mut dec, &client_ref, &speaker_resampled)
-        } else {
-            // No client reference available, pass through unchanged
-            speaker_resampled
-        };
+        // let speaker_cleaned = if !client_ref.is_empty() {
+        //     // Apply digital echo cancellation (optimized for digital echo paths)
+        //     let mut dec = DIGITAL_EC.lock().unwrap();
+        //     crate::aec::process_buffer(&mut dec, &client_ref, &speaker_resampled)
+        // } else {
+        //     // No client reference available, pass through unchanged
+        //     speaker_resampled
+        // };
 
         let speaker_cleaned = speaker_resampled;
 
         // Mix: 70% speaker (echo-cancelled) + 30% mic
         let mixed: Vec<f32> = speaker_cleaned
             .iter()
-            .zip(mic_cleaned.iter())
-            .map(|(s, m)| s * 0.7 + m * 0.3)
+            .zip(client_ref.iter())
+            .map(|(s, m)| s * 0.8 + m * 0.3)
             .collect();
 
         send_f32(&mixed, encoder, sp);
