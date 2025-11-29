@@ -528,7 +528,7 @@ mod cpal_impl {
             speaker_resampled
         };
 
-        let speaker_cleaned = speaker_resampled;
+        // let speaker_cleaned = speaker_resampled;
 
         // Mix: 70% speaker (echo-cancelled) + 30% mic
         let mixed: Vec<f32> = speaker_cleaned
