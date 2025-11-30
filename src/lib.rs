@@ -78,4 +78,4 @@ pub mod virtual_display_manager;
 mod kcp_stream;
 
 /// Acoustic Echo Cancellation (AEC) module
-pub mod aec;
+pub mod echo_handler;

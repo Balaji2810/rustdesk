@@ -245,8 +245,8 @@ mod cpal_impl {
         /// Stores decoded client audio at 48kHz stereo for echo cancellation
         pub(crate) static ref CLIENT_AUDIO_REF_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
         /// Digital Echo Canceller for real-time echo cancellation (stereo)
-        pub(super) static ref DIGITAL_EC: Arc<Mutex<crate::aec::DigitalEchoCanceller>> = 
-            Arc::new(Mutex::new(crate::aec::DigitalEchoCanceller::new_stereo()));
+        pub(super) static ref DIGITAL_EC: Arc<Mutex<crate::echo_handler::DigitalEchoCanceller>> = 
+            Arc::new(Mutex::new(crate::echo_handler::DigitalEchoCanceller::new_stereo()));
     }
 
     #[cfg(windows)]
@@ -522,7 +522,7 @@ mod cpal_impl {
         let speaker_cleaned = if !client_ref.is_empty() {
             // Apply digital echo cancellation (optimized for digital echo paths)
             let mut dec = DIGITAL_EC.lock().unwrap();
-            crate::aec::process_buffer(&mut dec, &client_ref, &speaker_resampled)
+            crate::echo_handler::process_buffer(&mut dec, &client_ref, &speaker_resampled)
         } else {
             // No client reference available, pass through unchanged
             speaker_resampled
