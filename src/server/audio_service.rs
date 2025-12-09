@@ -532,7 +532,7 @@ mod cpal_impl {
         let mixed: Vec<f32> = speaker_cleaned
             .iter()
             .zip(mic_resampled.iter())
-            .map(|(s, m)| s * 0.7 + m * 0.3)
+            .map(|(s, m)| s * 1.0 + m * 0.7)
             .collect();
 
         send_f32(&mixed, encoder, sp);
