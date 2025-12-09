@@ -4,6 +4,9 @@
 /// with optional RNNoise-based noise suppression. Automatically learns the echo 
 /// path (delay + gain + frequency response) without explicit delay estimation.
 
+#[cfg(windows)]
+use hbb_common::log;
+
 // ============================================================================
 // CONFIGURATION CONSTANTS
 // ============================================================================
@@ -77,8 +80,8 @@ pub struct DigitalEchoCanceller {
     input_buffer: Vec<f32>,
     /// Output overlap-add buffer
     output_buffer: Vec<f32>,
-    /// Noise suppression denoiser
-    denoiser: Option<nnnoiseless::DenoiseState<'static>>,
+    /// Noise suppression denoiser (boxed as nnnoiseless::DenoiseState::new() returns Box)
+    denoiser: Option<Box<nnnoiseless::DenoiseState<'static>>>,
     /// Echo reduction strength
     reduction: f32,
     /// Smoothing factor
@@ -135,7 +138,8 @@ impl DigitalEchoCanceller {
             .collect();
 
         // Create denoiser if noise suppression is enabled
-        let denoiser = if noise_suppression {
+        // nnnoiseless::DenoiseState::new() returns Box<DenoiseState>
+        let denoiser: Option<Box<nnnoiseless::DenoiseState<'static>>> = if noise_suppression {
             Some(nnnoiseless::DenoiseState::new())
         } else {
             None
@@ -174,6 +178,7 @@ impl DigitalEchoCanceller {
         self.output_buffer.clear();
         self.frame_count = 0;
         if self.denoiser.is_some() {
+            // nnnoiseless::DenoiseState::new() returns Box<DenoiseState>
             self.denoiser = Some(nnnoiseless::DenoiseState::new());
         }
     }
@@ -194,6 +199,7 @@ impl DigitalEchoCanceller {
     #[allow(dead_code)]
     pub fn set_noise_suppression(&mut self, enabled: bool, strength: f32) {
         if enabled && self.denoiser.is_none() {
+            // nnnoiseless::DenoiseState::new() returns Box<DenoiseState>
             self.denoiser = Some(nnnoiseless::DenoiseState::new());
         } else if !enabled {
             self.denoiser = None;
@@ -482,7 +488,7 @@ fn soft_limit(x: f32) -> f32 {
 /// nnnoiseless requires 48kHz audio and processes 480 samples at a time (10ms frames)
 #[cfg(windows)]
 fn apply_noise_suppression_inplace(
-    denoiser: &mut nnnoiseless::DenoiseState,
+    denoiser: &mut Box<nnnoiseless::DenoiseState>,
     samples: &[f32],
     strength: f32,
 ) -> Vec<f32> {
