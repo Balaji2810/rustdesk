@@ -119,6 +119,10 @@ winapi = { version = "0.3", features = [
     "ioapiset",
     "winspool",
 ] }
+# Echo cancellation with FDAF-AEC
+fdaf-aec = "0.1"
+# Noise suppression (RNNoise implementation)  
+nnnoiseless = "0.5"
 windows = { version = "0.61", features = [
     "Win32",
     "Win32_System",
